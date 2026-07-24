@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-TARGET_NET="192.168.2.0/24"
+TARGET_NET="10.0.0.0/24"
 LOG_TAG="[tcyclops-route]"
 
 # Detect the current default gateway WSL is using to reach the Windows host.
