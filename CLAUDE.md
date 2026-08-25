@@ -1,18 +1,28 @@
 # personal-scripts
 
-A collection of standalone shell scripts, organized by category under `scripts/`.
+A collection of standalone shell (and occasionally PowerShell) scripts, organized
+by category under `scripts/`.
 
 ## Layout
 
 ```
 scripts/
   git/
-    github_backup.sh   # backs up all repos for a GitHub owner into a 7z archive
+    github_backup.sh     # backs up all repos for a GitHub owner into a 7z archive
+  wsl/
+    attach_yubikey.ps1                 # attaches a YubiKey to WSL via usbipd-win
+    register_yubikey_attach_task.ps1   # registers a Scheduled Task that runs attach_yubikey.ps1 on USB connect
 ```
 
-New scripts go in `scripts/<category>/`, named `snake_case.sh`. Each script should
-be runnable directly (`./scripts/<category>/name.sh`), self-contained, and list its
-own requirements in a header comment — there is no shared lib/framework here.
+New scripts go in `scripts/<category>/`, named `snake_case.sh` (or `snake_case.ps1`
+for Windows-only scripts, e.g. WSL/usbipd helpers that must run on the Windows
+side). Each script should be runnable directly (`./scripts/<category>/name.sh`),
+self-contained, and list its own requirements in a header comment — there is no
+shared lib/framework here.
+
+Per-script usage, config, and requirements live in [README.md](README.md), not
+here — add a section there for every new script. This file covers conventions
+for writing/maintaining scripts, not how to use them.
 
 ## Dev environment
 
@@ -49,30 +59,19 @@ Every script here should follow these conventions (matches the existing scripts)
   `github_backup.sh`), printing a summary at the end instead of aborting the whole
   run on one failure.
 
-## github_backup.sh
+## PowerShell standards
 
-Backs up every repo (public + private) owned by a fixed GitHub user into a single
-timestamped `.7z` in `$OUTPUT_DIR` (default `$PWD`). For each repo: clones it, force-fetches
-all tags, and creates local tracking branches for every remote branch, so the
-resulting archive is a self-contained, browsable set of working trees — not a bare
-mirror.
+For the rare Windows-only script (`.ps1`):
 
-Requires: `gh` (authenticated — `gh auth status`), `git`, `7z`, `jq`.
-
-Config lives at the top of the script (edit directly, no CLI flags):
-- `OWNER` — GitHub user/org to back up.
-- `IGNORE_LIST` — `"owner/name"` entries to skip.
-- `OUTPUT_DIR` — env var, defaults to `$PWD`.
-- `GH_BACKUP_PASSWORD` — env var; if set, encrypts the archive (`7z -mhe=on`) and
-  also hides file names/metadata.
-
-### SSH / hardware key (Yubikey) note
-
-If `gh`'s git protocol is SSH and the key is hardware-backed (e.g. a `_sk` resident
-key), every `git`/`gh` operation opens a new SSH connection and re-triggers a
-PIN/touch prompt — this script does clone + fetch per repo, so a large repo list
-means a lot of prompts. Fix is SSH connection multiplexing (`ControlMaster` /
-`ControlPersist`) scoped to `github.com` in SSH config, so one PIN/touch covers the
-whole run. In this user's setup that config is managed via home-manager in the
-`nixos-config` repo (`home/modules/tools/ssh.nix`), not here — `~/.ssh/config` is a
-generated symlink into the Nix store and shouldn't be edited directly.
+- Comment-based help block (`.SYNOPSIS`/`.DESCRIPTION`/`.NOTES`) at the top, with
+  requirements listed under `.NOTES` — the PowerShell equivalent of the bash header
+  comment.
+- `Set-StrictMode -Version Latest` and `$ErrorActionPreference = 'Stop'` near the
+  top, mirroring `set -euo pipefail`.
+- `#Requires -RunAsAdministrator` when the script needs elevation (e.g. `usbipd`).
+- `Write-Output`/`Write-Warning`/`Write-Error` over `Write-Host`, so output stays
+  pipeline/redirect-friendly (matches `PSScriptAnalyzer`'s `PSAvoidUsingWriteHost`).
+- Check `$LASTEXITCODE` after calling external commands (`usbipd`, etc.) rather than
+  assuming success.
+- Lint with `Invoke-ScriptAnalyzer` (PSScriptAnalyzer module) before committing, the
+  PowerShell analogue of `shellcheck`.
