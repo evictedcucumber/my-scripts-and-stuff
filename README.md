@@ -57,10 +57,19 @@ no manual step.
   `Microsoft-Windows-DriverFrameworks-UserMode/Operational` — fires for any USB
   device, not just the YubiKey; `attach_yubikey.ps1` itself no-ops on a mismatch,
   so the broad trigger is safe. The script enables that event log if it's off.
-- Runs as `SYSTEM` (`ServiceAccount` logon, `Highest` run level) via
-  `powershell.exe -WindowStyle Hidden -NonInteractive`, so it's fully
-  backgrounded — no console window, no stored password, no dependency on an
-  interactive logon session.
+- Runs as the registering user (`Interactive` logon, `Highest` run level), no
+  password stored. It deliberately does **not** run as `SYSTEM`: `usbipd attach
+  --wsl` shells out to `wsl.exe`, and Microsoft Store WSL cannot be launched
+  from Session 0, so a `SYSTEM`/`ServiceAccount` task fires and "completes"
+  with no error in Task Scheduler's history but silently fails to attach
+  ([microsoft/WSL#9231](https://github.com/microsoft/WSL/issues/9231)). The
+  tradeoff is the task only fires while that user is logged on interactively.
+- The task's action runs `wscript.exe` against a small VBScript wrapper
+  (`run_attach_yubikey_hidden.vbs`, generated into the same deployment
+  directory) that launches `powershell.exe` via `WScript.Shell.Run` with a
+  hidden window style, rather than invoking `powershell.exe -WindowStyle
+  Hidden` directly from the task action — the latter still flashes a console
+  window briefly, since conhost creates it before the flag takes effect.
 - Idempotent: `Register-ScheduledTask -Force` replaces any existing task of the
   same name, so re-running after editing either script (or moving the repo) just
   updates the registered task in place.
@@ -69,5 +78,4 @@ Requires: Windows Task Scheduler (`ScheduledTasks` module, built in), run from a
 elevated PowerShell prompt. Expects `attach_yubikey.ps1` to already be deployed at
 `%USERPROFILE%\Documents\Scripts\attach_yubikey.ps1` — copy it there before
 running this script (that fixed path is resolved once at registration time and
-baked into the task's action, since the task itself later runs as `SYSTEM`, whose
-own `%USERPROFILE%` points elsewhere).
+baked into the task's action).

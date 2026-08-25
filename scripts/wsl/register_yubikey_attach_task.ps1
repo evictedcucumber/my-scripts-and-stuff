@@ -11,10 +11,22 @@
     attach_yubikey.ps1 itself no-ops when the connected device isn't a match,
     so the broad trigger is safe.
 
-    The task runs as SYSTEM with the highest privileges (so it always has the
-    Administrator rights usbipd needs, and never depends on an interactive
-    logon session) via powershell.exe -WindowStyle Hidden, so no console
-    window ever appears.
+    The task runs as the registering user (Interactive logon, not SYSTEM)
+    with the highest privileges. It must run as the interactive user rather
+    than SYSTEM because `usbipd attach --wsl` shells out to wsl.exe, and
+    Microsoft Store WSL cannot be launched from Session 0 - a
+    SYSTEM/ServiceAccount task would register and "run" successfully but
+    silently fail to attach (see https://github.com/microsoft/WSL/issues/9231).
+    Running as the user means the task only fires while that user is logged
+    on interactively.
+
+    The task's action launches wscript.exe against a small generated VBScript
+    wrapper (run_attach_yubikey_hidden.vbs, written into the same deployment
+    directory) instead of powershell.exe directly. powershell.exe's own
+    -WindowStyle Hidden isn't enough to keep the console fully invisible - the
+    console host still briefly flashes a window before the flag takes effect.
+    WScript.Shell.Run with an intWindowStyle of 0 launches the process without
+    ever creating a window in the first place.
 
     Re-running this script is safe/idempotent: Register-ScheduledTask -Force
     replaces any existing task of the same name with the current definition,
@@ -38,14 +50,18 @@ $ErrorActionPreference = 'Stop'
 $TaskName = 'AttachYubiKeyToWSL'
 $TaskDescription = 'Runs attach_yubikey.ps1 to attach a connected YubiKey to WSL whenever a USB device is connected.'
 
-# Fixed deployment location. Resolved to an absolute path here (this script
-# runs interactively, as the real user), so the task action gets a concrete
-# path baked in - it doesn't matter that the task itself later runs as
-# SYSTEM, whose own %USERPROFILE% would point somewhere else entirely.
+# Fixed deployment location, resolved to an absolute path here. The task
+# also runs as this same user (see principal below), so %USERPROFILE% at
+# registration time and at run time match.
 $ScriptsDir = Join-Path $env:USERPROFILE 'Documents\Scripts'
 $AttachScript = Join-Path $ScriptsDir 'attach_yubikey.ps1'
 
+# The task runs as this same user rather than SYSTEM - see .DESCRIPTION.
+$TaskUserId = "$env:USERDOMAIN\$env:USERNAME"
+
 $PowerShellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$WScriptExe = Join-Path $env:SystemRoot 'System32\wscript.exe'
+$HiddenWrapperScript = Join-Path $ScriptsDir 'run_attach_yubikey_hidden.vbs'
 
 # USB device-connect event: fires for any USB/PnP device, not just the
 # YubiKey - attach_yubikey.ps1 no-ops if the device that appeared isn't one.
@@ -71,6 +87,11 @@ if (-not (Test-Path -LiteralPath $PowerShellExe)) {
     exit 1
 }
 
+if (-not (Test-Path -LiteralPath $WScriptExe)) {
+    Write-Error "wscript.exe not found at expected path: $WScriptExe"
+    exit 1
+}
+
 # ---------------------------------------------------------------------------
 # Ensure the source event log is enabled (it's off by default on some builds)
 # ---------------------------------------------------------------------------
@@ -82,11 +103,27 @@ if (-not $log.IsEnabled) {
 }
 
 # ---------------------------------------------------------------------------
+# Write the hidden-launch VBScript wrapper (see .DESCRIPTION for why this
+# exists instead of invoking powershell.exe directly from the task action)
+# ---------------------------------------------------------------------------
+
+# VBScript string literals escape an embedded quote by doubling it.
+$innerCommandLine = "`"$PowerShellExe`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$AttachScript`""
+$vbsEscapedCommandLine = $innerCommandLine -replace '"', '""'
+
+$vbsContent = @"
+Set objShell = CreateObject("WScript.Shell")
+objShell.Run "$vbsEscapedCommandLine", 0, True
+"@
+Set-Content -LiteralPath $HiddenWrapperScript -Value $vbsContent -Encoding ASCII
+
+# ---------------------------------------------------------------------------
 # Build the task definition
 # ---------------------------------------------------------------------------
 
-$action = New-ScheduledTaskAction -Execute $PowerShellExe `
-    -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$AttachScript`""
+# //B (batch mode) suppresses wscript's own error dialogs/prompts.
+$action = New-ScheduledTaskAction -Execute $WScriptExe `
+    -Argument "//B `"$HiddenWrapperScript`""
 
 $triggerClass = Get-CimClass -ClassName MSFT_TaskEventTrigger -Namespace 'Root/Microsoft/Windows/TaskScheduler'
 $trigger = New-CimInstance -CimClass $triggerClass -ClientOnly
@@ -95,9 +132,11 @@ $trigger.Subscription = @"
 "@
 $trigger.Enabled = $true
 
-# SYSTEM + ServiceAccount: no stored password, no interactive session, so the
-# task runs fully backgrounded regardless of desktop/lock state.
-$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+# Interactive: runs in the user's own logon session (required for usbipd's
+# wsl.exe invocation to work - see .DESCRIPTION) with no stored password,
+# elevated automatically since the user must be an administrator. Only fires
+# while $TaskUserId is logged on interactively.
+$principal = New-ScheduledTaskPrincipal -UserId $TaskUserId -LogonType Interactive -RunLevel Highest
 
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
@@ -110,4 +149,4 @@ $settings = New-ScheduledTaskSettingsSet `
 Register-ScheduledTask -TaskName $TaskName -Description $TaskDescription `
     -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 
-Write-Output "Scheduled task '$TaskName' registered: runs $AttachScript (hidden, as SYSTEM) on USB device connect."
+Write-Output "Scheduled task '$TaskName' registered: runs $AttachScript (hidden, as $TaskUserId) on USB device connect."
