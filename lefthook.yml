@@ -1,0 +1,17 @@
+pre-commit:
+  parallel: true
+  commands:
+    shellcheck:
+      glob: "scripts/**/*.sh"
+      run: shellcheck -x {staged_files}
+    psscriptanalyzer:
+      glob: "scripts/**/*.ps1"
+      run: |
+        pwsh -NoProfile -NonInteractive -Command '& {
+          if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
+            Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser -Repository PSGallery
+          }
+          $results = $args | ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Severity Warning,Error }
+          $results | Format-Table -AutoSize
+          if ($results) { exit 1 }
+        }' {staged_files}

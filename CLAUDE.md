@@ -27,14 +27,18 @@ for writing/maintaining scripts, not how to use them.
 ## Dev environment
 
 This repo is a Nix flake (`flake.nix`) providing a devShell with the tools these
-scripts depend on (`gh`, `git`, `jq`, `p7zip`, ...). `.envrc` uses direnv (`use flake`)
-to load it automatically on `cd`.
+scripts depend on (`gh`, `git`, `jq`, `lefthook`, `p7zip`, `powershell`, `shellcheck`, ...).
+`.envrc` uses direnv (`use flake`) to load it automatically on `cd`.
 
 - Add a script's runtime dependencies to `devShells.default.packages` in
   [flake.nix](flake.nix) when introducing a new tool.
-- `shellcheck` is not currently in the devShell; run it ad hoc via
-  `nix shell nixpkgs#shellcheck -c shellcheck -x scripts/**/*.sh` before committing
-  script changes.
+- The devShell's `shellHook` runs `lefthook install`, wiring up the git hooks
+  defined in [lefthook.yml](lefthook.yml) automatically on `cd` (via direnv).
+  Those hooks run `shellcheck -x` on staged `*.sh` files and
+  `Invoke-ScriptAnalyzer` on staged `*.ps1` files at `pre-commit`, mirroring the
+  `shellcheck`/`psscriptanalyzer` CI workflows in `.github/workflows/` so lint
+  failures surface locally before a push triggers CI. Update `lefthook.yml`
+  alongside those workflows if the CI checks change.
 
 ## Bash standards
 

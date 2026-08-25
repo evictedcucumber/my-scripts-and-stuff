@@ -22,8 +22,14 @@
           gh
           git
           jq
+          lefthook
           p7zip
+          powershell
+          shellcheck
         ];
+        shellHook = ''
+          lefthook install
+        '';
       };
     });
 }
