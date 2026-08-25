@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# gh-backup.sh
+# github_backup.sh
 #
 # Backs up all GitHub repos owned by evictedcucumber (public and private)
 # into a single 7z archive. Creates normal, browsable repositories with
@@ -72,7 +72,7 @@ REPOS=()
 for repo in "${ALL_REPOS[@]}"; do
   skip=false
 
-  for ignored in "${IGNORE_LIST[@]:-}"; do
+  for ignored in "${IGNORE_LIST[@]}"; do
     [[ -z "$ignored" ]] && continue
     if [[ "$repo" == "$ignored" ]]; then
       skip=true
@@ -121,37 +121,40 @@ for repo in "${REPOS[@]}"; do
   echo
   echo "==== $repo ===="
 
-  if gh repo clone "$repo" "$dest"; then
-    (
-      cd "$dest"
-
-      echo "Fetching all refs..."
-      git fetch origin '+refs/heads/*:refs/remotes/origin/*'
-      git fetch origin --tags --force
-
-      echo "Creating local branches..."
-
-      while IFS= read -r remote_branch; do
-        [[ "$remote_branch" == "origin/HEAD" ]] && continue
-
-        branch="${remote_branch#origin/}"
-
-        if ! git show-ref --verify --quiet "refs/heads/$branch"; then
-          git branch --track "$branch" "$remote_branch" \
-            >/dev/null 2>&1 || true
-        fi
-      done < <(
-        git for-each-ref \
-          --format='%(refname:short)' \
-          refs/remotes/origin
-      )
-
-      echo "Repository ready."
-    )
-  else
+  if ! gh repo clone "$repo" "$dest"; then
     echo "WARNING: failed to clone $repo"
     FAILED+=("$repo")
     rm -rf "$dest"
+    continue
+  fi
+
+  if ! (
+    cd "$dest"
+
+    echo "Fetching all tags..."
+    git fetch origin --tags --force
+
+    echo "Creating local branches..."
+
+    while IFS= read -r remote_branch; do
+      [[ "$remote_branch" == "origin/HEAD" ]] && continue
+
+      branch="${remote_branch#origin/}"
+
+      if ! git show-ref --verify --quiet "refs/heads/$branch"; then
+        git branch --track "$branch" "$remote_branch" \
+          >/dev/null 2>&1 || true
+      fi
+    done < <(
+      git for-each-ref \
+        --format='%(refname:short)' \
+        refs/remotes/origin
+    )
+
+    echo "Repository ready."
+  ); then
+    echo "WARNING: failed to prepare $repo"
+    FAILED+=("$repo")
   fi
 done
 
