@@ -4,6 +4,36 @@ A repository with all my scripts. See [CLAUDE.md](CLAUDE.md) for repo layout and
 conventions for writing/maintaining scripts. This file documents what each script
 does, how to configure it, and its requirements.
 
+## scripts/archive/archive_directory.ps1
+
+Windows-side helper that recursively compresses a directory into a single `.7z`
+archive using 7-Zip's strongest lossless settings (LZMA2, `-mx=9`, `-mfb=273`, a
+large dictionary, solid, sort-by-type) and drops it in the current user's
+Downloads folder as `YYYY-MM-DD.7z` (today's local date). The named directory
+becomes the archive's top-level entry.
+
+```powershell
+# archives C:\projects\foo -> %USERPROFILE%\Downloads\2026-09-05.7z
+.\scripts\archive\archive_directory.ps1 C:\projects\foo
+```
+
+- `-Path <dir>` (position 0, required) — the directory to archive; relative or
+  absolute.
+- `-DestinationDirectory <dir>` — where to write the archive; defaults to the
+  Downloads known folder (registry-resolved, falling back to
+  `%USERPROFILE%\Downloads`).
+- `-DictionarySize <size>` — LZMA2 dictionary (e.g. `128m`, `256m`, `512m`,
+  `1g`); default `256m`. Bigger can compress better but needs roughly 10x that
+  in RAM; 7-Zip auto-shrinks it to fit smaller inputs.
+- `-Force` — replace an existing `YYYY-MM-DD.7z`; without it a `_2`, `_3`, …
+  suffix is used.
+- Supports `-WhatIf` / `-Confirm` (creates nothing under `-WhatIf`).
+
+Requires: Windows, PowerShell 5.1+, and [7-Zip](https://www.7-zip.org) on `PATH`
+(`7z`/`7za`) or installed under `%ProgramFiles%\7-Zip`. NTFS ACLs, alternate data
+streams, and creation/access timestamps are not captured — see the script's
+`.NOTES` for the switches to add if you need them.
+
 ## scripts/git/github_backup.sh
 
 Backs up every repo (public + private) owned by `OWNER` into a single timestamped

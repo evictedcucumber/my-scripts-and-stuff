@@ -7,6 +7,8 @@ by category under `scripts/`.
 
 ```
 scripts/
+  archive/
+    archive_directory.ps1   # max-compression 7z of a directory into ~/Downloads/YYYY-MM-DD.7z
   git/
     github_backup.sh     # backs up all repos for a GitHub owner into a 7z archive
   wsl/
