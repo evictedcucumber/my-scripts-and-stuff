@@ -13,6 +13,7 @@ scripts/
     github_backup.sh     # backs up all repos for a GitHub owner into a 7z archive
   wsl/
     attach_yubikey.ps1                 # attaches a YubiKey to WSL via usbipd-win
+    copy_to_downloads.sh               # copies a WSL file/dir to the Windows user's Downloads folder
     register_yubikey_attach_task.ps1   # registers a Scheduled Task that runs attach_yubikey.ps1 on USB connect
 ```
 

@@ -69,6 +69,30 @@ whole run. In this user's setup that config is managed via home-manager in the
 `nixos-config` repo (`home/modules/tools/ssh.nix`), not here — `~/.ssh/config` is a
 generated symlink into the Nix store and shouldn't be edited directly.
 
+## scripts/wsl/copy_to_downloads.sh
+
+Run from inside WSL: copies a file or directory to the Windows user's Downloads
+folder. The destination is read from the Windows "Shell Folders" registry entry
+via `powershell.exe` (so a relocated Downloads is respected), falling back to
+`%USERPROFILE%\Downloads` (`cmd.exe`) and then `/mnt/c/Users/$USER/Downloads`.
+The item keeps its own name and lands as `<Downloads>/<name>`; timestamps are
+preserved, mode/ownership are not (they don't map onto the Windows filesystem).
+
+```bash
+copy_to_downloads.sh ~/reports/2026-09        # -> C:\Users\me\Downloads\2026-09
+copy_to_downloads.sh --force ./build/app.zip
+```
+
+- `<wsl-path>` (positional, required) — the file or directory to copy.
+- `-d, --dest DIR` — destination directory instead of Downloads; accepts a WSL
+  path or a Windows path (`C:\...`). Also settable via `WIN_DOWNLOADS_DIR`.
+- `-f, --force` — replace an existing item of the same name (otherwise the copy
+  is refused).
+- `-v, --verbose` — pass `-v` to `cp`.
+
+Requires: WSL (`wslpath`), coreutils; `powershell.exe` / `cmd.exe` for Downloads
+autodetection (not needed when `--dest` / `WIN_DOWNLOADS_DIR` is given).
+
 ## scripts/wsl/attach_yubikey.ps1
 
 Windows-side helper (not run from WSL/bash) that finds a connected YubiKey via
