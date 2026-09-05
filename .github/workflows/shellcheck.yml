@@ -22,4 +22,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run shellcheck
-        run: shellcheck -x scripts/**/*.sh
+        # find/xargs rather than scripts/**/*.sh: the runner's bash has
+        # globstar off, so ** would only match one directory level.
+        run: find scripts -type f -name '*.sh' -print0 | xargs -0 -r shellcheck -x

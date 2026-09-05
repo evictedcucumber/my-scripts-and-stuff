@@ -6,20 +6,27 @@ does, how to configure it, and its requirements.
 
 ## scripts/git/github_backup.sh
 
-Backs up every repo (public + private) owned by a fixed GitHub user into a single
-timestamped `.7z` in `$OUTPUT_DIR` (default `$PWD`). For each repo: clones it, force-fetches
-all tags, and creates local tracking branches for every remote branch, so the
-resulting archive is a self-contained, browsable set of working trees — not a bare
-mirror.
+Backs up every repo (public + private) owned by `OWNER` into a single timestamped
+(UTC) `.7z` in `$OUTPUT_DIR` (default `$PWD`). For each repo: clones it,
+force-fetches all tags, checks out submodules, and creates local tracking
+branches for every remote branch, so the resulting archive is a self-contained,
+browsable set of working trees — not a bare mirror. After creation the archive
+is verified (`7z t`) and `chmod 600`ed; the run aborts up front if the target
+archive already exists, and errors out if *every* repo fails.
 
 Requires: `gh` (authenticated — `gh auth status`), `git`, `7z`, `jq`.
 
-Config lives at the top of the script (edit directly, no CLI flags):
-- `OWNER` — GitHub user/org to back up.
-- `IGNORE_LIST` — `"owner/name"` entries to skip.
+Config: `OWNER` and `IGNORE_LIST` sit at the top of the script; everything else
+is an env var.
+- `OWNER` — GitHub user/org to back up. Defaults to `evictedcucumber`; override
+  with `OWNER=...` in the environment.
+- `IGNORE_LIST` — `"owner/name"` entries to skip (edit the array in the script).
+- `GH_BACKUP_IGNORE` — env var; extra `"owner/name"` entries (space/newline
+  separated) appended to `IGNORE_LIST`.
 - `OUTPUT_DIR` — env var, defaults to `$PWD`.
 - `GH_BACKUP_PASSWORD` — env var; if set, encrypts the archive (`7z -mhe=on`) and
-  also hides file names/metadata.
+  also hides file names/metadata. Passed to `7z` as `-p...`, so it is briefly
+  visible in the process list — only use on a trusted host.
 
 ### SSH / hardware key (Yubikey) note
 
@@ -36,11 +43,13 @@ generated symlink into the Nix store and shouldn't be edited directly.
 
 Windows-side helper (not run from WSL/bash) that finds a connected YubiKey via
 `usbipd list` (matched on VID:PID `1050:0407`) and attaches it to WSL with
-`usbipd attach --wsl --busid <id>`. Skips the attach if the device is already in
-the `Attached` state, and no-ops with a message if no matching device is found.
+`usbipd attach --wsl --busid <id>`. Skips the attach if the device is already
+`Attached`; if the device has never been shared it runs `usbipd bind --busid
+<id>` first (one-time, persistent). No-ops with a message if no matching device
+is found, and exits non-zero if `usbipd list` itself fails.
 
 Requires: [usbipd-win](https://github.com/dorssel/usbipd-win), run from an elevated
-PowerShell prompt (`usbipd attach` needs Administrator).
+PowerShell prompt (`usbipd bind`/`attach` need Administrator).
 
 Run manually whenever the YubiKey needs to (re)appear inside WSL, e.g. after a
 replug or reboot — not scheduled or hooked into anything automatically. To
@@ -51,12 +60,19 @@ automate this, see `register_yubikey_attach_task.ps1` below.
 Windows-side, run once (and re-run any time to update): idempotently registers a
 Scheduled Task (`AttachYubiKeyToWSL`) that runs `attach_yubikey.ps1` whenever any
 USB device is connected, so plugging in the YubiKey auto-attaches it to WSL with
-no manual step.
+no manual step. Run with `-Remove` to tear it all down (unregister the task,
+delete the deployed script + wrapper).
 
+- Deploys `attach_yubikey.ps1` from next to this script to
+  `%USERPROFILE%\Documents\Scripts\attach_yubikey.ps1` (the fixed path baked
+  into the task action) — no manual copy step; re-running redeploys it.
 - Trigger: event `2003` (device connected) in
   `Microsoft-Windows-DriverFrameworks-UserMode/Operational` — fires for any USB
   device, not just the YubiKey; `attach_yubikey.ps1` itself no-ops on a mismatch,
-  so the broad trigger is safe. The script enables that event log if it's off.
+  so the broad trigger is safe. The script enables that event log if it's off
+  (via the API, falling back to `wevtutil` if the channel rejects the API write).
+- Task settings cap each run at a 5-minute `ExecutionTimeLimit`, so a stuck
+  `usbipd`/`wsl.exe` invocation can't block every later trigger.
 - Runs as the registering user (`Interactive` logon, `Highest` run level), no
   password stored. It deliberately does **not** run as `SYSTEM`: `usbipd attach
   --wsl` shells out to `wsl.exe`, and Microsoft Store WSL cannot be launched
@@ -75,7 +91,5 @@ no manual step.
   updates the registered task in place.
 
 Requires: Windows Task Scheduler (`ScheduledTasks` module, built in), run from an
-elevated PowerShell prompt. Expects `attach_yubikey.ps1` to already be deployed at
-`%USERPROFILE%\Documents\Scripts\attach_yubikey.ps1` — copy it there before
-running this script (that fixed path is resolved once at registration time and
-baked into the task's action).
+elevated PowerShell prompt, with `attach_yubikey.ps1` sitting next to this script
+(it is copied to the deployment path automatically).

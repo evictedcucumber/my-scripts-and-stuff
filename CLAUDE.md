@@ -57,6 +57,13 @@ Every script here should follow these conventions (matches the existing scripts)
   ensures failures inside a `( subshell )` step are actually caught — a subshell
   used only as the last statement of an `if`'s `then` body silently discards its
   exit status.
+- `set -e` is *ignored* inside anything run as an `if`/`while`/`!`/`&&`/`||`
+  condition, and that suppression reaches into subshells and functions called
+  there (re-arming `set -e` inside does nothing). So a multi-step
+  `if ! ( cd x; do_thing ); then` does **not** stop at a failing `do_thing`. When
+  a step like that needs per-command failure handling, put it in a function with
+  an explicit `|| return 1` / `|| exit 1` on each command (see `prepare_repo` in
+  `github_backup.sh`), not a bare `set -e`.
 - Quote all variable expansions unless intentionally relying on word-splitting/glob.
 - `echo "Error: ..." >&2` + `exit 1` for fatal errors; keep going and collect
   failures into a `FAILED=()` array for per-item operations in a loop (see
@@ -78,4 +85,7 @@ For the rare Windows-only script (`.ps1`):
 - Check `$LASTEXITCODE` after calling external commands (`usbipd`, etc.) rather than
   assuming success.
 - Lint with `Invoke-ScriptAnalyzer` (PSScriptAnalyzer module) before committing, the
-  PowerShell analogue of `shellcheck`.
+  PowerShell analogue of `shellcheck`. PSScriptAnalyzer is not in the flake
+  devShell (it isn't cleanly packaged in nixpkgs) — both the `psscriptanalyzer`
+  lefthook hook and the CI workflow `Install-Module` it on demand into the
+  user/CI PowerShell module path.

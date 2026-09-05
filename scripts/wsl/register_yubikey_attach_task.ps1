@@ -4,12 +4,13 @@
     automatically whenever a USB device is connected, fully hidden/backgrounded.
 
 .DESCRIPTION
-    Registers (creating or replacing) a Task Scheduler task named
-    'AttachYubiKeyToWSL' with an event trigger on USB device-connect events
-    (Microsoft-Windows-DriverFrameworks-UserMode/Operational, Event ID 2003).
-    That event fires for any USB device, not just a YubiKey -
-    attach_yubikey.ps1 itself no-ops when the connected device isn't a match,
-    so the broad trigger is safe.
+    Deploys attach_yubikey.ps1 (copied from beside this script) to
+    %USERPROFILE%\Documents\Scripts and registers (creating or replacing) a
+    Task Scheduler task named 'AttachYubiKeyToWSL' with an event trigger on
+    USB device-connect events (Microsoft-Windows-DriverFrameworks-UserMode/
+    Operational, Event ID 2003). That event fires for any USB device, not
+    just a YubiKey - attach_yubikey.ps1 itself no-ops when the connected
+    device isn't a match, so the broad trigger is safe.
 
     The task runs as the registering user (Interactive logon, not SYSTEM)
     with the highest privileges. It must run as the interactive user rather
@@ -32,13 +33,24 @@
     replaces any existing task of the same name with the current definition,
     and enabling an already-enabled event log is a no-op.
 
+    Pass -Remove to tear everything down: unregister the task and delete the
+    deployed attach_yubikey.ps1 and the generated VBScript wrapper.
+
+.PARAMETER Remove
+    Unregister the scheduled task and remove the deployed script + wrapper
+    instead of registering.
+
 .NOTES
     Requirements: Windows Task Scheduler (ScheduledTasks module, built in),
-    run elevated. Expects attach_yubikey.ps1 to already be deployed at
-    %USERPROFILE%\Documents\Scripts\attach_yubikey.ps1.
+    run elevated. attach_yubikey.ps1 must sit next to this script.
 #>
 
 #Requires -RunAsAdministrator
+
+[CmdletBinding()]
+param(
+    [switch]$Remove
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -55,6 +67,7 @@ $TaskDescription = 'Runs attach_yubikey.ps1 to attach a connected YubiKey to WSL
 # registration time and at run time match.
 $ScriptsDir = Join-Path $env:USERPROFILE 'Documents\Scripts'
 $AttachScript = Join-Path $ScriptsDir 'attach_yubikey.ps1'
+$SourceAttachScript = Join-Path $PSScriptRoot 'attach_yubikey.ps1'
 
 # The task runs as this same user rather than SYSTEM - see .DESCRIPTION.
 $TaskUserId = "$env:USERDOMAIN\$env:USERNAME"
@@ -68,17 +81,40 @@ $HiddenWrapperScript = Join-Path $ScriptsDir 'run_attach_yubikey_hidden.vbs'
 $EventLogName = 'Microsoft-Windows-DriverFrameworks-UserMode/Operational'
 $EventId = 2003
 
+if (-not (Get-Module -ListAvailable -Name ScheduledTasks)) {
+    Write-Error "Required module 'ScheduledTasks' not available."
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Teardown (-Remove)
+# ---------------------------------------------------------------------------
+
+if ($Remove) {
+    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        Write-Output "Unregistered scheduled task '$TaskName'."
+    }
+    else {
+        Write-Output "Scheduled task '$TaskName' not present."
+    }
+
+    foreach ($path in @($HiddenWrapperScript, $AttachScript)) {
+        if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path -Force
+            Write-Output "Removed $path"
+        }
+    }
+
+    exit 0
+}
+
 # ---------------------------------------------------------------------------
 # Sanity checks
 # ---------------------------------------------------------------------------
 
-if (-not (Test-Path -LiteralPath $AttachScript)) {
-    Write-Error "attach_yubikey.ps1 not found at expected deployment path: $AttachScript"
-    exit 1
-}
-
-if (-not (Get-Module -ListAvailable -Name ScheduledTasks)) {
-    Write-Error "Required module 'ScheduledTasks' not available."
+if (-not (Test-Path -LiteralPath $SourceAttachScript)) {
+    Write-Error "attach_yubikey.ps1 not found next to this script: $SourceAttachScript"
     exit 1
 }
 
@@ -93,13 +129,38 @@ if (-not (Test-Path -LiteralPath $WScriptExe)) {
 }
 
 # ---------------------------------------------------------------------------
+# Deploy attach_yubikey.ps1 to the fixed location baked into the task action
+# ---------------------------------------------------------------------------
+
+New-Item -ItemType Directory -Path $ScriptsDir -Force | Out-Null
+Copy-Item -LiteralPath $SourceAttachScript -Destination $AttachScript -Force
+Write-Output "Deployed attach_yubikey.ps1 to $AttachScript"
+
+# ---------------------------------------------------------------------------
 # Ensure the source event log is enabled (it's off by default on some builds)
 # ---------------------------------------------------------------------------
 
-$log = Get-WinEvent -ListLog $EventLogName
+$log = Get-WinEvent -ListLog $EventLogName -ErrorAction SilentlyContinue
+if ($null -eq $log) {
+    Write-Error "Event log channel '$EventLogName' not found on this system."
+    exit 1
+}
+
 if (-not $log.IsEnabled) {
-    $log.IsEnabled = $true
-    $log.SaveChanges()
+    try {
+        $log.IsEnabled = $true
+        $log.SaveChanges()
+    }
+    catch {
+        # Some operational/analytic channels reject the config-object write;
+        # wevtutil is the reliable fallback.
+        Write-Warning "Enabling '$EventLogName' via API failed ($($_.Exception.Message)); trying wevtutil."
+        & wevtutil.exe set-log $EventLogName /enabled:true
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to enable event log channel '$EventLogName' (wevtutil exit $LASTEXITCODE)."
+            exit 1
+        }
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -115,7 +176,9 @@ $vbsContent = @"
 Set objShell = CreateObject("WScript.Shell")
 objShell.Run "$vbsEscapedCommandLine", 0, True
 "@
-Set-Content -LiteralPath $HiddenWrapperScript -Value $vbsContent -Encoding ASCII
+# UTF-16LE (with BOM) so wscript reads the paths correctly even if the
+# username / deployment path contains non-ASCII characters.
+Set-Content -LiteralPath $HiddenWrapperScript -Value $vbsContent -Encoding Unicode
 
 # ---------------------------------------------------------------------------
 # Build the task definition
@@ -138,9 +201,12 @@ $trigger.Enabled = $true
 # while $TaskUserId is logged on interactively.
 $principal = New-ScheduledTaskPrincipal -UserId $TaskUserId -LogonType Interactive -RunLevel Highest
 
+# ExecutionTimeLimit caps a stuck usbipd/wsl.exe invocation so it can't block
+# every later trigger (MultipleInstances IgnoreNew would drop them otherwise).
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-    -StartWhenAvailable -MultipleInstances IgnoreNew
+    -StartWhenAvailable -MultipleInstances IgnoreNew `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
 
 # ---------------------------------------------------------------------------
 # Register (idempotent: -Force replaces any existing task of the same name)
