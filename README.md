@@ -114,12 +114,13 @@ automate this, see `register_yubikey_attach_task.ps1` below.
 Windows-side, run once (and re-run any time to update): idempotently registers a
 Scheduled Task (`AttachYubiKeyToWSL`) that runs `attach_yubikey.ps1` whenever any
 USB device is connected, so plugging in the YubiKey auto-attaches it to WSL with
-no manual step. Run with `-Remove` to tear it all down (unregister the task,
-delete the deployed script + wrapper).
+no manual step. Run with `-Remove` to unregister the task and delete the
+generated VBScript wrapper (`attach_yubikey.ps1` is left in place).
 
-- Deploys `attach_yubikey.ps1` from next to this script to
-  `%USERPROFILE%\Documents\Scripts\attach_yubikey.ps1` (the fixed path baked
-  into the task action) — no manual copy step; re-running redeploys it.
+- Expects `attach_yubikey.ps1` to already be deployed at
+  `%USERPROFILE%\Documents\Scripts\attach_yubikey.ps1` — copy it there before
+  running this. That fixed path is resolved once at registration time and baked
+  into the task's action.
 - Trigger: event `2003` (device connected) in
   `Microsoft-Windows-DriverFrameworks-UserMode/Operational` — fires for any USB
   device, not just the YubiKey; `attach_yubikey.ps1` itself no-ops on a mismatch,
@@ -139,11 +140,14 @@ delete the deployed script + wrapper).
   directory) that launches `powershell.exe` via `WScript.Shell.Run` with a
   hidden window style, rather than invoking `powershell.exe -WindowStyle
   Hidden` directly from the task action — the latter still flashes a console
-  window briefly, since conhost creates it before the flag takes effect.
+  window briefly, since conhost creates it before the flag takes effect. On
+  each run the wrapper is validated (present, UTF-16LE, expected content) and
+  rewritten only if it is missing, wrongly encoded, or out of date.
 - Idempotent: `Register-ScheduledTask -Force` replaces any existing task of the
   same name, so re-running after editing either script (or moving the repo) just
   updates the registered task in place.
 
 Requires: Windows Task Scheduler (`ScheduledTasks` module, built in), run from an
-elevated PowerShell prompt, with `attach_yubikey.ps1` sitting next to this script
-(it is copied to the deployment path automatically).
+elevated PowerShell prompt. Expects `attach_yubikey.ps1` to already be deployed
+at `%USERPROFILE%\Documents\Scripts\attach_yubikey.ps1` — copy it there before
+running this script.

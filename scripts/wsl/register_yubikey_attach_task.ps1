@@ -4,13 +4,17 @@
     automatically whenever a USB device is connected, fully hidden/backgrounded.
 
 .DESCRIPTION
-    Deploys attach_yubikey.ps1 (copied from beside this script) to
-    %USERPROFILE%\Documents\Scripts and registers (creating or replacing) a
-    Task Scheduler task named 'AttachYubiKeyToWSL' with an event trigger on
-    USB device-connect events (Microsoft-Windows-DriverFrameworks-UserMode/
-    Operational, Event ID 2003). That event fires for any USB device, not
-    just a YubiKey - attach_yubikey.ps1 itself no-ops when the connected
-    device isn't a match, so the broad trigger is safe.
+    Registers (creating or replacing) a Task Scheduler task named
+    'AttachYubiKeyToWSL' with an event trigger on USB device-connect events
+    (Microsoft-Windows-DriverFrameworks-UserMode/Operational, Event ID 2003).
+    That event fires for any USB device, not just a YubiKey -
+    attach_yubikey.ps1 itself no-ops when the connected device isn't a match,
+    so the broad trigger is safe.
+
+    attach_yubikey.ps1 must already be deployed at
+    %USERPROFILE%\Documents\Scripts\attach_yubikey.ps1 - copy it there before
+    running this. That fixed path is resolved once here and baked into the
+    task's action.
 
     The task runs as the registering user (Interactive logon, not SYSTEM)
     with the highest privileges. It must run as the interactive user rather
@@ -27,22 +31,26 @@
     -WindowStyle Hidden isn't enough to keep the console fully invisible - the
     console host still briefly flashes a window before the flag takes effect.
     WScript.Shell.Run with an intWindowStyle of 0 launches the process without
-    ever creating a window in the first place.
+    ever creating a window in the first place. On every run the wrapper is
+    validated (present, UTF-16LE, expected content) and rewritten only if it is
+    missing, wrongly encoded, or out of date.
 
     Re-running this script is safe/idempotent: Register-ScheduledTask -Force
     replaces any existing task of the same name with the current definition,
-    and enabling an already-enabled event log is a no-op.
+    enabling an already-enabled event log is a no-op, and the VBScript wrapper
+    is only rewritten when it has drifted.
 
-    Pass -Remove to tear everything down: unregister the task and delete the
-    deployed attach_yubikey.ps1 and the generated VBScript wrapper.
+    Pass -Remove to unregister the task and delete the generated VBScript
+    wrapper. attach_yubikey.ps1 is left in place.
 
 .PARAMETER Remove
-    Unregister the scheduled task and remove the deployed script + wrapper
+    Unregister the scheduled task and delete the generated VBScript wrapper
     instead of registering.
 
 .NOTES
     Requirements: Windows Task Scheduler (ScheduledTasks module, built in),
-    run elevated. attach_yubikey.ps1 must sit next to this script.
+    run elevated. attach_yubikey.ps1 must already be deployed at
+    %USERPROFILE%\Documents\Scripts\attach_yubikey.ps1.
 #>
 
 #Requires -RunAsAdministrator
@@ -67,7 +75,6 @@ $TaskDescription = 'Runs attach_yubikey.ps1 to attach a connected YubiKey to WSL
 # registration time and at run time match.
 $ScriptsDir = Join-Path $env:USERPROFILE 'Documents\Scripts'
 $AttachScript = Join-Path $ScriptsDir 'attach_yubikey.ps1'
-$SourceAttachScript = Join-Path $PSScriptRoot 'attach_yubikey.ps1'
 
 # The task runs as this same user rather than SYSTEM - see .DESCRIPTION.
 $TaskUserId = "$env:USERDOMAIN\$env:USERNAME"
@@ -99,11 +106,9 @@ if ($Remove) {
         Write-Output "Scheduled task '$TaskName' not present."
     }
 
-    foreach ($path in @($HiddenWrapperScript, $AttachScript)) {
-        if (Test-Path -LiteralPath $path) {
-            Remove-Item -LiteralPath $path -Force
-            Write-Output "Removed $path"
-        }
+    if (Test-Path -LiteralPath $HiddenWrapperScript) {
+        Remove-Item -LiteralPath $HiddenWrapperScript -Force
+        Write-Output "Removed $HiddenWrapperScript"
     }
 
     exit 0
@@ -113,8 +118,8 @@ if ($Remove) {
 # Sanity checks
 # ---------------------------------------------------------------------------
 
-if (-not (Test-Path -LiteralPath $SourceAttachScript)) {
-    Write-Error "attach_yubikey.ps1 not found next to this script: $SourceAttachScript"
+if (-not (Test-Path -LiteralPath $AttachScript)) {
+    Write-Error "attach_yubikey.ps1 not found at $AttachScript - copy it into that folder first."
     exit 1
 }
 
@@ -127,14 +132,6 @@ if (-not (Test-Path -LiteralPath $WScriptExe)) {
     Write-Error "wscript.exe not found at expected path: $WScriptExe"
     exit 1
 }
-
-# ---------------------------------------------------------------------------
-# Deploy attach_yubikey.ps1 to the fixed location baked into the task action
-# ---------------------------------------------------------------------------
-
-New-Item -ItemType Directory -Path $ScriptsDir -Force | Out-Null
-Copy-Item -LiteralPath $SourceAttachScript -Destination $AttachScript -Force
-Write-Output "Deployed attach_yubikey.ps1 to $AttachScript"
 
 # ---------------------------------------------------------------------------
 # Ensure the source event log is enabled (it's off by default on some builds)
@@ -164,8 +161,9 @@ if (-not $log.IsEnabled) {
 }
 
 # ---------------------------------------------------------------------------
-# Write the hidden-launch VBScript wrapper (see .DESCRIPTION for why this
-# exists instead of invoking powershell.exe directly from the task action)
+# Write / refresh the hidden-launch VBScript wrapper (see .DESCRIPTION for why
+# this exists instead of invoking powershell.exe directly from the task
+# action). It is validated on every run and only rewritten when it has drifted.
 # ---------------------------------------------------------------------------
 
 # VBScript string literals escape an embedded quote by doubling it.
@@ -176,9 +174,59 @@ $vbsContent = @"
 Set objShell = CreateObject("WScript.Shell")
 objShell.Run "$vbsEscapedCommandLine", 0, True
 "@
-# UTF-16LE (with BOM) so wscript reads the paths correctly even if the
-# username / deployment path contains non-ASCII characters.
-Set-Content -LiteralPath $HiddenWrapperScript -Value $vbsContent -Encoding Unicode
+
+function Test-HiddenWrapper {
+    # $true only if the wrapper exists, is UTF-16LE (BOM), and matches
+    # $ExpectedContent (ignoring line-ending / trailing-whitespace differences).
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [Parameter(Mandatory)] [string] $ExpectedContent
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Write-Verbose "VBScript wrapper missing: $Path"
+        return $false
+    }
+
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+    }
+    catch {
+        Write-Verbose "VBScript wrapper unreadable ($($_.Exception.Message)): $Path"
+        return $false
+    }
+
+    # Set-Content -Encoding Unicode writes UTF-16LE with a BOM (0xFF 0xFE).
+    if ($bytes.Length -lt 2 -or $bytes[0] -ne 0xFF -or $bytes[1] -ne 0xFE) {
+        Write-Verbose "VBScript wrapper is not UTF-16LE: $Path"
+        return $false
+    }
+
+    $actual = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::Unicode)
+    $normActual = ($actual -replace "`r`n", "`n").Trim()
+    $normExpected = ($ExpectedContent -replace "`r`n", "`n").Trim()
+    if ($normActual -ne $normExpected) {
+        Write-Verbose "VBScript wrapper content is out of date: $Path"
+        return $false
+    }
+
+    return $true
+}
+
+if (Test-HiddenWrapper -Path $HiddenWrapperScript -ExpectedContent $vbsContent) {
+    Write-Output "VBScript wrapper is current: $HiddenWrapperScript"
+}
+else {
+    # UTF-16LE (with BOM) so wscript reads the paths correctly even if the
+    # username / deployment path contains non-ASCII characters.
+    Set-Content -LiteralPath $HiddenWrapperScript -Value $vbsContent -Encoding Unicode
+
+    if (-not (Test-HiddenWrapper -Path $HiddenWrapperScript -ExpectedContent $vbsContent)) {
+        Write-Error "VBScript wrapper failed validation after writing: $HiddenWrapperScript"
+        exit 1
+    }
+    Write-Output "VBScript wrapper (re)generated: $HiddenWrapperScript"
+}
 
 # ---------------------------------------------------------------------------
 # Build the task definition
