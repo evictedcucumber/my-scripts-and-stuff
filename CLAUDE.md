@@ -11,6 +11,8 @@ scripts/
     archive_directory.ps1   # max-compression 7z of a directory into ~/Downloads/YYYY-MM-DD.7z
   git/
     github_backup.sh     # backs up all repos for a GitHub owner into a 7z archive
+  maintenance/
+    windows_maintenance.ps1   # one pass: Windows Update + winget upgrade + Disk Cleanup + defrag (self-elevates via UAC)
   wsl/
     attach_yubikey.ps1                 # attaches a YubiKey to WSL via usbipd-win
     copy_to_downloads.sh               # copies a WSL file/dir to the Windows user's Downloads folder

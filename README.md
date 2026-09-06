@@ -69,6 +69,78 @@ whole run. In this user's setup that config is managed via home-manager in the
 `nixos-config` repo (`home/modules/tools/ssh.nix`), not here — `~/.ssh/config` is a
 generated symlink into the Nix store and shouldn't be edited directly.
 
+## scripts/maintenance/windows_maintenance.ps1
+
+Windows-side helper (not run from WSL/bash) that runs four system-maintenance
+tasks in one pass and prints an `OK` / `FAIL` / `SKIP` summary at the end. Steps
+are independent — one failing does not abort the rest — and the script exits
+non-zero if any step failed. It never reboots.
+
+It does **not** require elevation to start. Windows Update, Disk Cleanup and
+defrag need Administrator; if any of them is going to run and the session is not
+elevated, the script **relaunches itself elevated in a new console** (one UAC
+prompt), runs there, mirrors that run's exit code, and leaves the window open at
+the end so the summary is readable. `-NoElevate` suppresses the relaunch — those
+steps are then marked `SKIP` (not `FAIL`) and the run exits non-zero. The winget
+step needs no elevation of its own (without it, only user-scope packages are
+upgraded). An explicit `-Skip…` always wins over both.
+
+```powershell
+# full pass — prompts for elevation if not already admin
+.\scripts\maintenance\windows_maintenance.ps1
+
+# no elevation, no UAC prompt: just upgrade user-scope winget packages
+.\scripts\maintenance\windows_maintenance.ps1 -NoElevate -SkipWindowsUpdate -SkipDiskCleanup -SkipDefrag
+
+# skip the slow ones
+.\scripts\maintenance\windows_maintenance.ps1 -SkipWindowsUpdate -SkipDefrag
+```
+
+1. **Windows Update** — installs all applicable updates via the
+   [`PSWindowsUpdate`](https://www.powershellgallery.com/packages/PSWindowsUpdate)
+   module (`Get-WindowsUpdate -AcceptAll -Install -IgnoreReboot`). If the module
+   is missing it is installed from the PSGallery on first run (`Install-Module`,
+   `CurrentUser` scope; the NuGet provider is bootstrapped first, and PSGallery
+   may prompt once to trust it on a locked-down host). Automatic reboots are
+   suppressed; a resulting pending reboot is reported in the summary only.
+2. **winget** — `winget upgrade --all --include-unknown` with
+   `--accept-source-agreements --accept-package-agreements
+   --disable-interactivity`. winget's "no applicable upgrades" result
+   (`0x8A15002B`) counts as success. When elevated, any other non-zero exit
+   fails the step; when not elevated it is downgraded to a warning (winget
+   can't touch machine-scope packages without Administrator).
+3. **Disk Cleanup (C:) + component store** — writes `StateFlags<profile>` for
+   every Disk Cleanup handler **except "Downloads Folder"** under
+   `...\Explorer\VolumeCaches`, runs `cleanmgr /sagerun:<profile>` and waits for
+   it, then `DISM /Online /Cleanup-Image /StartComponentCleanup` to trim WinSxS.
+   cleanmgr runs against every fixed drive, not just C:, and **this empties the
+   Recycle Bin**. The step continues (DISM only) if `cleanmgr.exe` is absent
+   (Server SKUs).
+4. **Optimize / defrag all volumes** — `Optimize-Volume` on every fixed
+   NTFS/ReFS volume with a drive letter, with no operation switch so Windows
+   picks the media-appropriate action per volume (defrag on HDD, retrim on SSD),
+   same as the built-in "Optimize Drives" task / `defrag /O`.
+
+- `-SkipWindowsUpdate`, `-SkipWinget`, `-SkipDiskCleanup`, `-SkipDefrag` — skip
+  the matching step. An explicit skip wins over the elevation logic: if it
+  leaves no admin-only step to run, there is no relaunch and no non-zero exit.
+- `-SagerunProfile <0-65535>` — the Disk Cleanup sageset/sagerun profile number
+  used for the `StateFlags` values and `cleanmgr /sagerun:N`; default `100`.
+  Change it only if that profile number is already in use on the box.
+- `-NoElevate` — never relaunch elevated; skip the admin-only steps instead
+  (exit non-zero). For unattended runs where a UAC prompt can't be answered.
+- `-Relaunched` — internal, set by the script on its own elevated relaunch to
+  hold the new window open at the end; don't pass it by hand.
+
+Requires: Windows 10/11 (or matching Server), PowerShell 5.1+. No
+`#Requires -RunAsAdministrator` — the script self-elevates when an admin-only
+step is due (or, with `-NoElevate`, skips it). Internet access for steps 1–2;
+`winget` (App Installer) on `PATH`; `cleanmgr.exe` and `DISM` (both in-box,
+though cleanmgr is an optional Feature on Server). PSScriptAnalyzer note:
+`Get-Date`, `Get-Volume`, `Optimize-Volume`, `Get-WindowsUpdate` etc. are
+Windows-only and not resolvable on the Linux CI linter, which is fine — the
+default ruleset does not check command existence.
+
 ## scripts/wsl/copy_to_downloads.sh
 
 Run from inside WSL: copies a file or directory to the Windows user's Downloads
