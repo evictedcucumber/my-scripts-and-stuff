@@ -76,6 +76,19 @@ tasks in one pass and prints an `OK` / `FAIL` / `SKIP` summary at the end. Steps
 are independent — one failing does not abort the rest — and the script exits
 non-zero if any step failed. It never reboots.
 
+**Each step runs in its own console window.** The orchestrator re-invokes the
+script with an internal `-RunStep <name>` per step, waits for it, and reads a
+small JSON result back from a temp run directory (path printed at the start and
+end of the run). That keeps each step's noisy output — winget's table redraws,
+the DISM progress bar, `Optimize-Volume -Verbose` — in a separate window and a
+per-step `output.log`, leaving the orchestrator window a clean
+one-line-per-step progress list. A step window auto-closes a few seconds after
+a successful step and stays open (waiting for Enter) on failure; the run
+directory (`%TEMP%\windows_maintenance_<timestamp>\<Step>\`) is kept afterward.
+`-KeepStepWindows` keeps every step window open. (`Start-Transcript` on
+Windows PowerShell 5.1 may not capture native-EXE output in full — the live
+window always shows everything.)
+
 It does **not** require elevation to start. Windows Update, Disk Cleanup and
 defrag need Administrator; if any of them is going to run and the session is not
 elevated, the script **relaunches itself elevated in a new console** (one UAC
@@ -127,10 +140,13 @@ upgraded). An explicit `-Skip…` always wins over both.
 - `-SagerunProfile <0-65535>` — the Disk Cleanup sageset/sagerun profile number
   used for the `StateFlags` values and `cleanmgr /sagerun:N`; default `100`.
   Change it only if that profile number is already in use on the box.
+- `-KeepStepWindows` — keep every per-step console window open until dismissed
+  (press Enter), instead of auto-closing after a successful step.
 - `-NoElevate` — never relaunch elevated; skip the admin-only steps instead
   (exit non-zero). For unattended runs where a UAC prompt can't be answered.
-- `-Relaunched` — internal, set by the script on its own elevated relaunch to
-  hold the new window open at the end; don't pass it by hand.
+- `-Relaunched`, `-RunStep`, `-RunDir` — internal, set by the script when it
+  relaunches itself (for elevation) or launches a step's window; don't pass
+  them by hand.
 
 Requires: Windows 10/11 (or matching Server), PowerShell 5.1+. No
 `#Requires -RunAsAdministrator` — the script self-elevates when an admin-only

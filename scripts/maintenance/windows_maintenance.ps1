@@ -10,6 +10,16 @@
     printed at the end. The script exits non-zero if any step failed. It never
     reboots.
 
+    Each step runs in its own console window: the orchestrator re-invokes this
+    script with -RunStep <name> per step, waits for it, and reads a small JSON
+    result back from a temp run directory (printed at the start and end of the
+    run). That keeps each step's noisy output - winget's table redraws, the
+    DISM progress bar, Optimize-Volume -Verbose - in a separate window and a
+    per-step output.log, leaving the orchestrator window a clean progress list.
+    A step window closes a few seconds after a successful step and stays open
+    (waiting for Enter) on failure; -KeepStepWindows keeps every step window
+    open.
+
     The script does not require elevation to start. If it is launched without
     Administrator and any step that needs it (Windows Update, Disk Cleanup,
     defrag) is going to run, the script relaunches itself elevated in a new
@@ -68,14 +78,27 @@
     registry values and "cleanmgr /sagerun:N". Default 100. Change it only if
     that profile number is already configured for something else on this box.
 
+.PARAMETER KeepStepWindows
+    Keep every per-step console window open until dismissed (press Enter),
+    instead of auto-closing a few seconds after a successful step.
+
 .PARAMETER NoElevate
     Do not relaunch elevated when an admin-only step is due to run. Those steps
     are skipped instead and the run exits non-zero. Use this for unattended
     runs where a UAC prompt cannot be answered.
 
 .PARAMETER Relaunched
-    Internal. Set by the script on its own elevated relaunch; keeps the new
-    console window open at the end. Not meant to be passed by hand.
+    Internal. Set by the script on its own elevated relaunch; keeps the
+    orchestrator window open at the end. Not meant to be passed by hand.
+
+.PARAMETER RunStep
+    Internal. Names the single step to run in this process (the orchestrator
+    sets this when launching a step's console window). Not meant to be passed
+    by hand.
+
+.PARAMETER RunDir
+    Internal. The temp run directory a -RunStep child reads/writes (result JSON
+    and output.log). Set by the orchestrator.
 
 .NOTES
     Requirements: Windows 10 / 11 (or matching Server), PowerShell 5.1+. No
@@ -107,20 +130,35 @@ param(
     [ValidateRange(0, 65535)]
     [int]$SagerunProfile = 100,
 
+    [switch]$KeepStepWindows,
     [switch]$NoElevate,
-    [switch]$Relaunched
+
+    # Internal - set by the script when it relaunches itself.
+    [switch]$Relaunched,
+    [ValidateSet('WindowsUpdate', 'Winget', 'DiskCleanup', 'Defrag')]
+    [string]$RunStep,
+    [string]$RunDir
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # ---------------------------------------------------------------------------
-# Step runner - mirrors the bash FAILED=() convention: one step's failure
-# never aborts the run, outcomes are collected and summarised at the end.
+# How this runs
+#
+# The orchestrator (a normal invocation) does no maintenance work itself: for
+# each step it launches a fresh console window that re-invokes this same script
+# with -RunStep <name>, waits for it, and reads back a small JSON result file
+# from -RunDir. So each step's noisy output (winget's redraws, DISM's progress
+# bar, Optimize-Volume -Verbose) lands in its own window and log, leaving the
+# orchestrator window a clean one-line-per-step progress list plus a summary.
 #
 # A step function streams its own progress with Write-Output and reports its
-# one-line result by assigning $script:StepDetail (returning it would fold the
-# streamed progress lines into the result and stop them printing live).
+# one-line result by assigning $script:StepDetail; $script:RebootRequired flags
+# a pending reboot. In -RunStep mode both are serialised to the result file.
+#
+# Outcomes are collected, never aborting the run on one failure (mirrors the
+# bash FAILED=() convention), and summarised at the end.
 # ---------------------------------------------------------------------------
 
 $script:Results = [System.Collections.Generic.List[psobject]]::new()
@@ -128,6 +166,11 @@ $script:RebootRequired = $false
 $script:SkippedForAdmin = $false
 $script:IsAdmin = $false
 $script:StepDetail = ''
+$script:StepCount = 4
+$script:HostExe = (Get-Process -Id $PID).Path
+if ([string]::IsNullOrEmpty($script:HostExe)) {
+    $script:HostExe = 'powershell.exe'
+}
 
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -150,45 +193,203 @@ function Format-ProcessArgument {
 }
 
 function Invoke-Step {
+    # Orchestrator side: run one step in its own console window and fold the
+    # result it writes to $RunDir\<Step>\result.json into $script:Results.
     param(
         [Parameter(Mandatory)] [string] $Name,
-        [Parameter(Mandatory)] [scriptblock] $Action,
+        [Parameter(Mandatory)] [ValidateSet('WindowsUpdate', 'Winget', 'DiskCleanup', 'Defrag')] [string] $Step,
         [switch] $Skip,
         [switch] $RequiresAdmin
     )
 
-    Write-Output ''
-    Write-Output ('=' * 72)
-    Write-Output "  $Name"
-    Write-Output ('=' * 72)
+    $ordinal = '[{0}/{1}] {2}' -f ($script:Results.Count + 1), $script:StepCount, $Name
 
     if ($Skip) {
-        Write-Output 'Skipped (-Skip... switch).'
+        Write-Output "$ordinal - skipped (-Skip... switch)"
         $script:Results.Add([pscustomobject]@{ Step = $Name; Status = 'SKIP'; Detail = 'requested' })
         return
     }
 
     if ($RequiresAdmin -and -not $script:IsAdmin) {
-        Write-Warning 'Needs an elevated session; skipping. Re-run from an Administrator prompt to include this step.'
+        Write-Warning "$ordinal - skipped: needs Administrator (drop -NoElevate to auto-elevate)"
         $script:SkippedForAdmin = $true
         $script:Results.Add([pscustomobject]@{ Step = $Name; Status = 'SKIP'; Detail = 'needs Administrator (not elevated)' })
         return
     }
 
-    $script:StepDetail = ''
+    $stepDir = Join-Path $script:RunDir $Step
+    $resultFile = Join-Path $stepDir 'result.json'
+
+    $childArgs = @(
+        '-NoProfile'
+        '-ExecutionPolicy'
+        'Bypass'
+        '-File'
+        (Format-ProcessArgument $script:SelfPath)
+        '-RunStep'
+        $Step
+        '-RunDir'
+        (Format-ProcessArgument $script:RunDir)
+        '-SagerunProfile'
+        ([string]$script:SagerunProfile)
+    )
+    if ($script:KeepStepWindows) {
+        $childArgs += '-KeepStepWindows'
+    }
+
+    Write-Output "$ordinal - running in a separate window..."
     $start = Get-Date
     try {
-        & $Action
-        $span = (Get-Date) - $start
-        Write-Output ('-> OK  ({0:hh\:mm\:ss})  {1}' -f $span, $script:StepDetail)
-        $script:Results.Add([pscustomobject]@{ Step = $Name; Status = 'OK'; Detail = $script:StepDetail })
+        $proc = Start-Process -FilePath $script:HostExe -ArgumentList $childArgs -Wait -PassThru -ErrorAction Stop
     }
     catch {
-        $span = (Get-Date) - $start
-        $message = $_.Exception.Message
-        Write-Warning ('-> FAILED  ({0:hh\:mm\:ss})  {1}' -f $span, $message)
-        $script:Results.Add([pscustomobject]@{ Step = $Name; Status = 'FAIL'; Detail = $message })
+        $detail = "could not launch step window: $($_.Exception.Message)"
+        Write-Warning "$ordinal - FAILED  $detail"
+        $script:Results.Add([pscustomobject]@{ Step = $Name; Status = 'FAIL'; Detail = $detail })
+        return
     }
+    $span = (Get-Date) - $start
+
+    $result = $null
+    if (Test-Path -LiteralPath $resultFile) {
+        try {
+            $result = Get-Content -LiteralPath $resultFile -Raw | ConvertFrom-Json
+        }
+        catch {
+            Write-Verbose "Could not parse ${resultFile}: $($_.Exception.Message)"
+        }
+    }
+
+    if ($null -eq $result -or -not $result.PSObject.Properties['Status']) {
+        $detail = "step window exited without a result (exit code $($proc.ExitCode))"
+        Write-Warning ('{0} - FAILED  ({1:hh\:mm\:ss})  {2}' -f $ordinal, $span, $detail)
+        $script:Results.Add([pscustomobject]@{ Step = $Name; Status = 'FAIL'; Detail = $detail })
+        return
+    }
+
+    if ($result.PSObject.Properties['RebootRequired'] -and $result.RebootRequired) {
+        $script:RebootRequired = $true
+    }
+    $status = [string]$result.Status
+    $detail = [string]$result.Detail
+
+    $line = '{0} - {1}  ({2:hh\:mm\:ss})  {3}' -f $ordinal, $status, $span, $detail
+    if ($status -eq 'OK') {
+        Write-Output $line
+    }
+    else {
+        Write-Warning $line
+    }
+    $script:Results.Add([pscustomobject]@{ Step = $Name; Status = $status; Detail = $detail })
+}
+
+function Invoke-MaintenanceStep {
+    # Child side: run exactly one step in this process, capture its console to a
+    # transcript, write result.json for the orchestrator, and exit.
+    param(
+        [Parameter(Mandatory)] [ValidateSet('WindowsUpdate', 'Winget', 'DiskCleanup', 'Defrag')] [string] $Step,
+        [Parameter(Mandatory)] [string] $RunDir,
+        [Parameter(Mandatory)] [int] $SagerunProfile,
+        [switch] $KeepOpen
+    )
+
+    $title = @{
+        WindowsUpdate = 'Windows Update'
+        Winget        = 'winget upgrade --all'
+        DiskCleanup   = 'Disk Cleanup (C:) + WinSxS'
+        Defrag        = 'Optimize / defrag volumes'
+    }[$Step]
+
+    $stepDir = Join-Path $RunDir $Step
+    New-Item -ItemType Directory -Path $stepDir -Force | Out-Null
+
+    try {
+        $Host.UI.RawUI.WindowTitle = "maintenance: $title"
+    }
+    catch {
+        Write-Verbose "Could not set window title: $($_.Exception.Message)"
+    }
+
+    $transcribing = $false
+    try {
+        Start-Transcript -LiteralPath (Join-Path $stepDir 'output.log') -Force | Out-Null
+        $transcribing = $true
+    }
+    catch {
+        Write-Verbose "Transcript unavailable: $($_.Exception.Message)"
+    }
+
+    Write-Output ('=' * 72)
+    Write-Output "  $title   -   $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+    Write-Output ('=' * 72)
+
+    $script:StepDetail = ''
+    $script:RebootRequired = $false
+    $status = 'OK'
+    $detail = ''
+    try {
+        switch ($Step) {
+            'WindowsUpdate' { Invoke-WindowsUpdate }
+            'Winget' { Invoke-WingetUpgrade }
+            'DiskCleanup' { Invoke-DiskCleanup -SagerunProfile $SagerunProfile }
+            'Defrag' { Invoke-VolumeOptimization }
+        }
+        $detail = $script:StepDetail
+    }
+    catch {
+        $status = 'FAIL'
+        $detail = $_.Exception.Message
+        Write-Warning "FAILED: $detail"
+    }
+
+    if ($transcribing) {
+        try {
+            Stop-Transcript | Out-Null
+        }
+        catch {
+            Write-Verbose "Stop-Transcript: $($_.Exception.Message)"
+        }
+    }
+
+    $payload = [pscustomobject]@{
+        Step           = $Step
+        Status         = $status
+        Detail         = $detail
+        RebootRequired = [bool]$script:RebootRequired
+    }
+    try {
+        $payload | ConvertTo-Json -Compress |
+            Set-Content -LiteralPath (Join-Path $stepDir 'result.json') -Encoding UTF8
+    }
+    catch {
+        Write-Warning "Could not write result.json: $($_.Exception.Message)"
+    }
+
+    Write-Output ''
+    Write-Output ('-' * 72)
+    if ($status -eq 'OK') {
+        Write-Output "Step complete: $detail"
+    }
+    else {
+        Write-Warning "Step failed: $detail"
+    }
+
+    if ($status -ne 'OK' -or $KeepOpen) {
+        try {
+            [void](Read-Host 'Press Enter to close this window')
+        }
+        catch {
+            Write-Verbose "Could not pause for input: $($_.Exception.Message)"
+        }
+    }
+    else {
+        Start-Sleep -Seconds 3
+    }
+
+    if ($status -eq 'OK') {
+        exit 0
+    }
+    exit 1
 }
 
 function Test-PendingReboot {
@@ -454,20 +655,30 @@ function Invoke-VolumeOptimization {
 # Run
 # ---------------------------------------------------------------------------
 
+$script:SelfPath = $PSCommandPath
+$script:SagerunProfile = $SagerunProfile
+$script:KeepStepWindows = [bool]$KeepStepWindows
+
+# Child mode: this process was launched by the orchestrator to run one step.
+if ($RunStep) {
+    if ([string]::IsNullOrEmpty($RunDir)) {
+        Write-Error '-RunStep requires -RunDir.'
+        exit 1
+    }
+    Invoke-MaintenanceStep -Step $RunStep -RunDir $RunDir -SagerunProfile $SagerunProfile -KeepOpen:$KeepStepWindows
+    exit 1  # Invoke-MaintenanceStep always exits; this is just a guard.
+}
+
 $script:IsAdmin = Test-Administrator
 
 # Self-elevate: if an admin-only step (Windows Update / Disk Cleanup / defrag)
 # is going to run and we are not elevated, relaunch the whole script elevated
 # in a new console and mirror its exit code. -NoElevate opts out (the steps are
-# then skipped by the -RequiresAdmin gate in Invoke-Step).
+# then skipped by the -RequiresAdmin gate in Invoke-Step). Step windows spawned
+# later inherit this elevation - no further UAC prompts.
 $adminStepDue = -not ($SkipWindowsUpdate -and $SkipDiskCleanup -and $SkipDefrag)
 if (-not $script:IsAdmin -and $adminStepDue -and -not $NoElevate) {
     Write-Output 'Windows Update / Disk Cleanup / defrag need Administrator - relaunching elevated (a UAC prompt will appear)...'
-
-    $hostExe = (Get-Process -Id $PID).Path
-    if ([string]::IsNullOrEmpty($hostExe)) {
-        $hostExe = 'powershell.exe'
-    }
 
     $childArgs = @(
         '-NoProfile'
@@ -478,7 +689,7 @@ if (-not $script:IsAdmin -and $adminStepDue -and -not $NoElevate) {
         '-Relaunched'
     )
     foreach ($entry in $PSBoundParameters.GetEnumerator()) {
-        if ($entry.Key -eq 'Relaunched' -or $entry.Key -eq 'NoElevate') {
+        if ($entry.Key -in @('Relaunched', 'NoElevate', 'RunStep', 'RunDir')) {
             continue
         }
         if ($entry.Value -is [System.Management.Automation.SwitchParameter]) {
@@ -492,7 +703,7 @@ if (-not $script:IsAdmin -and $adminStepDue -and -not $NoElevate) {
     }
 
     try {
-        $child = Start-Process -FilePath $hostExe -ArgumentList $childArgs `
+        $child = Start-Process -FilePath $script:HostExe -ArgumentList $childArgs `
             -Verb RunAs -Wait -PassThru -ErrorAction Stop
     }
     catch {
@@ -503,16 +714,20 @@ if (-not $script:IsAdmin -and $adminStepDue -and -not $NoElevate) {
 }
 
 $overallStart = Get-Date
+$script:RunDir = Join-Path ([System.IO.Path]::GetTempPath()) ('windows_maintenance_{0}' -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+New-Item -ItemType Directory -Path $script:RunDir -Force | Out-Null
+
 Write-Output "Windows maintenance run - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 Write-Output "Host: $env:COMPUTERNAME   User: $env:USERNAME   Elevated: $script:IsAdmin   Disk Cleanup profile: $SagerunProfile"
+Write-Output "Per-step windows and logs: $script:RunDir"
 if (-not $script:IsAdmin -and $adminStepDue) {
     Write-Warning '-NoElevate and not elevated - Windows Update, Disk Cleanup and defrag will be skipped.'
 }
 
-Invoke-Step -Name 'Windows Update'               -Skip:$SkipWindowsUpdate -RequiresAdmin -Action { Invoke-WindowsUpdate }
-Invoke-Step -Name 'winget upgrade --all'         -Skip:$SkipWinget                       -Action { Invoke-WingetUpgrade }
-Invoke-Step -Name 'Disk Cleanup (C:) + WinSxS'   -Skip:$SkipDiskCleanup   -RequiresAdmin -Action { Invoke-DiskCleanup -SagerunProfile $SagerunProfile }
-Invoke-Step -Name 'Optimize / defrag volumes'    -Skip:$SkipDefrag        -RequiresAdmin -Action { Invoke-VolumeOptimization }
+Invoke-Step -Name 'Windows Update'             -Step WindowsUpdate -Skip:$SkipWindowsUpdate -RequiresAdmin
+Invoke-Step -Name 'winget upgrade --all'       -Step Winget        -Skip:$SkipWinget
+Invoke-Step -Name 'Disk Cleanup (C:) + WinSxS' -Step DiskCleanup   -Skip:$SkipDiskCleanup   -RequiresAdmin
+Invoke-Step -Name 'Optimize / defrag volumes'  -Step Defrag        -Skip:$SkipDefrag        -RequiresAdmin
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -527,6 +742,8 @@ $script:Results |
     Format-Table -AutoSize -Property Step, Status, Detail |
     Out-String |
     Write-Output
+
+Write-Output "Per-step output logs: $script:RunDir"
 
 if ($script:RebootRequired) {
     Write-Warning 'A system reboot is required to finish installing updates. This script does not reboot.'
