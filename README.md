@@ -122,6 +122,11 @@ upgraded). An explicit `-Skip…` always wins over both.
    (`0x8A15002B`) counts as success. When elevated, any other non-zero exit
    fails the step; when not elevated it is downgraded to a warning (winget
    can't touch machine-scope packages without Administrator).
+   If a WSL distro is running (checked via `vmmemWSL` / `wsl -l --running`),
+   `Microsoft.WSL` is `--exclude`d from the upgrade — upgrading it runs
+   `wsl --shutdown` and would drop live sessions; the summary notes it was
+   held back. On a winget too old for `--exclude`, if a WSL upgrade is
+   pending the whole step is marked `SKIP` instead.
 3. **Disk Cleanup (C:) + component store** — writes `StateFlags<profile>` for
    every Disk Cleanup handler **except "Downloads Folder"** under
    `...\Explorer\VolumeCaches`, runs `cleanmgr /sagerun:<profile>` and waits for

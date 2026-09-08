@@ -46,6 +46,12 @@
          elevated it is downgraded to a warning, since winget cannot upgrade
          machine-scope packages without Administrator.
 
+         If a WSL distribution is running, the WSL package (Microsoft.WSL) is
+         excluded from the upgrade (--exclude) - upgrading it runs
+         "wsl --shutdown" and would drop live sessions. If this winget build
+         has no --exclude and a WSL upgrade is pending, the whole step is
+         marked SKIP rather than risk the shutdown.
+
       3. Disk Cleanup (C:) + component store
          Enables every Disk Cleanup handler except "Downloads Folder" by
          writing StateFlags<profile> under ...\Explorer\VolumeCaches, runs
@@ -109,7 +115,9 @@
         registers the NuGet provider and may prompt once to trust PSGallery on
         a locked-down host).
       - winget: App Installer / winget (in-box on Windows 11 and current
-        Windows 10). Machine-scope upgrades need Administrator.
+        Windows 10). Machine-scope upgrades need Administrator. The WSL
+        hold-back also calls wsl.exe (with WSL_UTF8=1) to see if a distro is
+        running.
       - Disk Cleanup (needs Administrator): cleanmgr.exe (an optional Feature on
         Server SKUs) and DISM - the step carries on if cleanmgr is missing.
       - Optimize-Volume (needs Administrator): the Storage module (in-box).
@@ -166,6 +174,7 @@ $script:RebootRequired = $false
 $script:SkippedForAdmin = $false
 $script:IsAdmin = $false
 $script:StepDetail = ''
+$script:StepStatus = 'OK'
 $script:StepCount = 4
 $script:HostExe = (Get-Process -Id $PID).Path
 if ([string]::IsNullOrEmpty($script:HostExe)) {
@@ -324,6 +333,7 @@ function Invoke-MaintenanceStep {
     Write-Output ('=' * 72)
 
     $script:StepDetail = ''
+    $script:StepStatus = 'OK'
     $script:RebootRequired = $false
     $status = 'OK'
     $detail = ''
@@ -334,6 +344,9 @@ function Invoke-MaintenanceStep {
             'DiskCleanup' { Invoke-DiskCleanup -SagerunProfile $SagerunProfile }
             'Defrag' { Invoke-VolumeOptimization }
         }
+        # A step may down-grade itself to SKIP (e.g. winget holding back a WSL
+        # upgrade while WSL is running).
+        $status = $script:StepStatus
         $detail = $script:StepDetail
     }
     catch {
@@ -367,14 +380,13 @@ function Invoke-MaintenanceStep {
 
     Write-Output ''
     Write-Output ('-' * 72)
-    if ($status -eq 'OK') {
-        Write-Output "Step complete: $detail"
-    }
-    else {
-        Write-Warning "Step failed: $detail"
+    switch ($status) {
+        'OK' { Write-Output "Step complete: $detail" }
+        'SKIP' { Write-Output "Step skipped: $detail" }
+        default { Write-Warning "Step failed: $detail" }
     }
 
-    if ($status -ne 'OK' -or $KeepOpen) {
+    if ($status -eq 'FAIL' -or $KeepOpen) {
         try {
             [void](Read-Host 'Press Enter to close this window')
         }
@@ -386,10 +398,10 @@ function Invoke-MaintenanceStep {
         Start-Sleep -Seconds 3
     }
 
-    if ($status -eq 'OK') {
-        exit 0
+    if ($status -eq 'FAIL') {
+        exit 1
     }
-    exit 1
+    exit 0
 }
 
 function Test-PendingReboot {
@@ -499,6 +511,73 @@ function Resolve-Winget {
     return $null
 }
 
+function Test-WslRunning {
+    # True if a WSL distribution is currently running. Upgrading the WSL package
+    # runs "wsl --shutdown", so a WSL upgrade would kill any live session.
+    $wsl = Get-Command -Name wsl.exe -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $wsl) {
+        return $false
+    }
+
+    # The WSL2 utility VM process is present only while a distro is up - a
+    # locale-independent signal that does not depend on parsing wsl.exe output.
+    if (Get-Process -Name 'vmmemWSL' -ErrorAction SilentlyContinue) {
+        return $true
+    }
+
+    # wsl.exe defaults to UTF-16LE output; WSL_UTF8=1 makes --list emit UTF-8.
+    $previous = [Environment]::GetEnvironmentVariable('WSL_UTF8')
+    $env:WSL_UTF8 = '1'
+    try {
+        $listed = & $wsl.Source --list --running --quiet 2>$null
+    }
+    catch {
+        return $false
+    }
+    finally {
+        if ($null -eq $previous) {
+            Remove-Item -LiteralPath Env:WSL_UTF8 -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:WSL_UTF8 = $previous
+        }
+    }
+
+    $text = (($listed -join "`n") -replace "`0", '').Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $false
+    }
+    # Older builds ignore --quiet and print a "no running distributions" notice.
+    return ($text -notmatch 'no running|no distributions')
+}
+
+function Test-WingetSupportsExclude {
+    param([Parameter(Mandatory)] [string] $Winget)
+    try {
+        $help = & $Winget upgrade --help 2>$null
+    }
+    catch {
+        return $false
+    }
+    return (($help -join "`n") -match '--exclude')
+}
+
+function Test-WingetUpgradeAvailable {
+    param(
+        [Parameter(Mandatory)] [string] $Winget,
+        [Parameter(Mandatory)] [string] $Id
+    )
+    try {
+        $out = & $Winget list --id $Id --exact --upgrade-available `
+            --disable-interactivity --accept-source-agreements 2>$null
+    }
+    catch {
+        return $false
+    }
+    return ($LASTEXITCODE -eq 0 -and (($out -join "`n") -match [regex]::Escape($Id)))
+}
+
 function Invoke-WingetUpgrade {
     $winget = Resolve-Winget
     if (-not $winget) {
@@ -518,19 +597,39 @@ function Invoke-WingetUpgrade {
         '--disable-interactivity'
     )
 
+    # Hold the WSL package back while a distro is running - upgrading it runs
+    # "wsl --shutdown" and would drop live sessions.
+    $wslPackageId = 'Microsoft.WSL'
+    $wslHeldBack = $false
+    if (Test-WslRunning) {
+        if (Test-WingetSupportsExclude -Winget $winget) {
+            $wingetArgs += @('--exclude', $wslPackageId)
+            $wslHeldBack = Test-WingetUpgradeAvailable -Winget $winget -Id $wslPackageId
+            Write-Output "WSL is running - excluding $wslPackageId from this upgrade."
+        }
+        elseif (Test-WingetUpgradeAvailable -Winget $winget -Id $wslPackageId) {
+            $script:StepStatus = 'SKIP'
+            $script:StepDetail = "held back: WSL is running with a pending $wslPackageId upgrade and this winget build has no --exclude; run 'wsl --shutdown' first or upgrade WSL manually"
+            Write-Warning $script:StepDetail
+            return
+        }
+    }
+
     Write-Output "$winget $($wingetArgs -join ' ')"
     & $winget @wingetArgs
     $code = $LASTEXITCODE
+
+    $wslNote = if ($wslHeldBack) { "; $wslPackageId held back (WSL running)" } else { '' }
 
     # 0x8A15002B / -1978335189 = APPINSTALLER_CLI_ERROR_UPDATE_NOT_APPLICABLE:
     # there was nothing to upgrade.
     $noApplicableUpgrades = -1978335189
     if ($code -eq 0) {
-        $script:StepDetail = 'winget upgrades applied'
+        $script:StepDetail = "winget upgrades applied$wslNote"
         return
     }
     if ($code -eq $noApplicableUpgrades) {
-        $script:StepDetail = 'nothing to upgrade'
+        $script:StepDetail = "nothing to upgrade$wslNote"
         return
     }
 
@@ -541,7 +640,7 @@ function Invoke-WingetUpgrade {
         # from a genuine failure, so downgrade it to a warning rather than
         # failing the step.
         Write-Warning "winget exited $code ($hex); machine-scope upgrades need an elevated session."
-        $script:StepDetail = "user-scope only; winget exit $hex (re-run elevated for machine-scope)"
+        $script:StepDetail = "user-scope only; winget exit $hex (re-run elevated for machine-scope)$wslNote"
         return
     }
     throw "winget exited $code ($hex)."
