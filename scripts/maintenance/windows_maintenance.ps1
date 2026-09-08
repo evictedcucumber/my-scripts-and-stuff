@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
     Runs a batch of Windows maintenance tasks in one pass: Windows Update,
-    winget upgrades, Disk Cleanup on C:, and per-volume optimization
-    (defrag / retrim).
+    winget upgrades, Disk Cleanup on C:, per-volume optimization
+    (defrag / retrim), and - with -DriverUpdate - Windows Update driver updates.
 
 .DESCRIPTION
     Runs the steps below in order. Each step is independent - a failure is
@@ -67,6 +67,20 @@
          HDDs, retrim on SSDs, slab consolidation on thin-provisioned storage -
          the same as the built-in "Optimize Drives" task and "defrag /O".
 
+      5. Driver updates  (only with -DriverUpdate)
+         Installs driver updates offered through Windows Update
+         (Get-WindowsUpdate -UpdateType Driver, same PSWindowsUpdate module as
+         step 1). This is the "verified drivers only" path: every driver on
+         Windows Update is WHQL-certified and submitted by the hardware vendor
+         through Microsoft's Hardware Dev Center - unlike Driver Booster and
+         similar tools, which pull from their own unvetted repositories. Off by
+         default because driver updates carry more regression risk than
+         software updates; reboots are suppressed and reported like step 1.
+
+.PARAMETER DriverUpdate
+    Also install driver updates offered through Windows Update (WHQL-signed,
+    vendor-submitted - see step 5). Off by default.
+
 .PARAMETER SkipWindowsUpdate
     Skip step 1 (Windows Update).
 
@@ -121,15 +135,19 @@
       - Disk Cleanup (needs Administrator): cleanmgr.exe (an optional Feature on
         Server SKUs) and DISM - the step carries on if cleanmgr is missing.
       - Optimize-Volume (needs Administrator): the Storage module (in-box).
+      - Driver updates (-DriverUpdate, needs Administrator): same requirements
+        as Windows Update (internet, PSWindowsUpdate).
 
-    This script never reboots. After a Windows Update run that reports a
-    pending reboot, restart the machine yourself to finish installation.
+    This script never reboots. After a Windows Update or driver-update run that
+    reports a pending reboot, restart the machine yourself to finish it.
 #>
 
 #Requires -Version 5.1
 
 [CmdletBinding()]
 param(
+    [switch]$DriverUpdate,
+
     [switch]$SkipWindowsUpdate,
     [switch]$SkipWinget,
     [switch]$SkipDiskCleanup,
@@ -143,7 +161,7 @@ param(
 
     # Internal - set by the script when it relaunches itself.
     [switch]$Relaunched,
-    [ValidateSet('WindowsUpdate', 'Winget', 'DiskCleanup', 'Defrag')]
+    [ValidateSet('WindowsUpdate', 'DriverUpdate', 'Winget', 'DiskCleanup', 'Defrag')]
     [string]$RunStep,
     [string]$RunDir
 )
@@ -175,7 +193,7 @@ $script:SkippedForAdmin = $false
 $script:IsAdmin = $false
 $script:StepDetail = ''
 $script:StepStatus = 'OK'
-$script:StepCount = 4
+$script:StepCount = if ($DriverUpdate) { 5 } else { 4 }
 $script:HostExe = (Get-Process -Id $PID).Path
 if ([string]::IsNullOrEmpty($script:HostExe)) {
     $script:HostExe = 'powershell.exe'
@@ -206,7 +224,7 @@ function Invoke-Step {
     # result it writes to $RunDir\<Step>\result.json into $script:Results.
     param(
         [Parameter(Mandatory)] [string] $Name,
-        [Parameter(Mandatory)] [ValidateSet('WindowsUpdate', 'Winget', 'DiskCleanup', 'Defrag')] [string] $Step,
+        [Parameter(Mandatory)] [ValidateSet('WindowsUpdate', 'DriverUpdate', 'Winget', 'DiskCleanup', 'Defrag')] [string] $Step,
         [switch] $Skip,
         [switch] $RequiresAdmin
     )
@@ -296,7 +314,7 @@ function Invoke-MaintenanceStep {
     # Child side: run exactly one step in this process, capture its console to a
     # transcript, write result.json for the orchestrator, and exit.
     param(
-        [Parameter(Mandatory)] [ValidateSet('WindowsUpdate', 'Winget', 'DiskCleanup', 'Defrag')] [string] $Step,
+        [Parameter(Mandatory)] [ValidateSet('WindowsUpdate', 'DriverUpdate', 'Winget', 'DiskCleanup', 'Defrag')] [string] $Step,
         [Parameter(Mandatory)] [string] $RunDir,
         [Parameter(Mandatory)] [int] $SagerunProfile,
         [switch] $KeepOpen
@@ -304,6 +322,7 @@ function Invoke-MaintenanceStep {
 
     $title = @{
         WindowsUpdate = 'Windows Update'
+        DriverUpdate  = 'Driver updates (Windows Update)'
         Winget        = 'winget upgrade --all'
         DiskCleanup   = 'Disk Cleanup (C:) + WinSxS'
         Defrag        = 'Optimize / defrag volumes'
@@ -340,6 +359,7 @@ function Invoke-MaintenanceStep {
     try {
         switch ($Step) {
             'WindowsUpdate' { Invoke-WindowsUpdate }
+            'DriverUpdate' { Invoke-DriverUpdate }
             'Winget' { Invoke-WingetUpgrade }
             'DiskCleanup' { Invoke-DiskCleanup -SagerunProfile $SagerunProfile }
             'Defrag' { Invoke-VolumeOptimization }
@@ -478,6 +498,37 @@ function Invoke-WindowsUpdate {
         return
     }
     $script:StepDetail = "$($applied.Count) update(s) applied"
+}
+
+function Invoke-DriverUpdate {
+    # "Verified drivers only": drivers offered through Windows Update are
+    # WHQL-certified and submitted by the hardware vendor via Microsoft's
+    # Hardware Dev Center. Nothing here touches a third-party driver repository.
+    Initialize-PSWindowsUpdate
+
+    # -UpdateType Driver restricts the WUA search to Type='Driver'.
+    $applied = @(
+        Get-WindowsUpdate -UpdateType Driver -AcceptAll -Install -IgnoreReboot `
+            -Confirm:$false -Verbose -ErrorAction Stop
+    )
+
+    if ($applied.Count -gt 0) {
+        $applied |
+            Select-Object -Property Status, KB, Size, Title |
+            Format-Table -AutoSize |
+            Out-String |
+            Write-Output
+    }
+    else {
+        Write-Output 'No applicable driver updates.'
+    }
+
+    if (Test-PendingReboot) {
+        $script:RebootRequired = $true
+        $script:StepDetail = "$($applied.Count) driver update(s) applied; REBOOT REQUIRED"
+        return
+    }
+    $script:StepDetail = "$($applied.Count) driver update(s) applied"
 }
 
 # ---------------------------------------------------------------------------
@@ -770,14 +821,14 @@ if ($RunStep) {
 
 $script:IsAdmin = Test-Administrator
 
-# Self-elevate: if an admin-only step (Windows Update / Disk Cleanup / defrag)
-# is going to run and we are not elevated, relaunch the whole script elevated
-# in a new console and mirror its exit code. -NoElevate opts out (the steps are
-# then skipped by the -RequiresAdmin gate in Invoke-Step). Step windows spawned
-# later inherit this elevation - no further UAC prompts.
-$adminStepDue = -not ($SkipWindowsUpdate -and $SkipDiskCleanup -and $SkipDefrag)
+# Self-elevate: if an admin-only step (Windows Update / driver updates / Disk
+# Cleanup / defrag) is going to run and we are not elevated, relaunch the whole
+# script elevated in a new console and mirror its exit code. -NoElevate opts out
+# (the steps are then skipped by the -RequiresAdmin gate in Invoke-Step). Step
+# windows spawned later inherit this elevation - no further UAC prompts.
+$adminStepDue = $DriverUpdate -or -not ($SkipWindowsUpdate -and $SkipDiskCleanup -and $SkipDefrag)
 if (-not $script:IsAdmin -and $adminStepDue -and -not $NoElevate) {
-    Write-Output 'Windows Update / Disk Cleanup / defrag need Administrator - relaunching elevated (a UAC prompt will appear)...'
+    Write-Output 'Windows Update / driver updates / Disk Cleanup / defrag need Administrator - relaunching elevated (a UAC prompt will appear)...'
 
     $childArgs = @(
         '-NoProfile'
@@ -820,13 +871,16 @@ Write-Output "Windows maintenance run - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 Write-Output "Host: $env:COMPUTERNAME   User: $env:USERNAME   Elevated: $script:IsAdmin   Disk Cleanup profile: $SagerunProfile"
 Write-Output "Per-step windows and logs: $script:RunDir"
 if (-not $script:IsAdmin -and $adminStepDue) {
-    Write-Warning '-NoElevate and not elevated - Windows Update, Disk Cleanup and defrag will be skipped.'
+    Write-Warning '-NoElevate and not elevated - Windows Update, driver updates, Disk Cleanup and defrag will be skipped.'
 }
 
 Invoke-Step -Name 'Windows Update'             -Step WindowsUpdate -Skip:$SkipWindowsUpdate -RequiresAdmin
 Invoke-Step -Name 'winget upgrade --all'       -Step Winget        -Skip:$SkipWinget
 Invoke-Step -Name 'Disk Cleanup (C:) + WinSxS' -Step DiskCleanup   -Skip:$SkipDiskCleanup   -RequiresAdmin
 Invoke-Step -Name 'Optimize / defrag volumes'  -Step Defrag        -Skip:$SkipDefrag        -RequiresAdmin
+if ($DriverUpdate) {
+    Invoke-Step -Name 'Driver updates (Windows Update)' -Step DriverUpdate -RequiresAdmin
+}
 
 # ---------------------------------------------------------------------------
 # Summary

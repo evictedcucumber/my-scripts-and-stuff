@@ -72,9 +72,10 @@ generated symlink into the Nix store and shouldn't be edited directly.
 ## scripts/maintenance/windows_maintenance.ps1
 
 Windows-side helper (not run from WSL/bash) that runs four system-maintenance
-tasks in one pass and prints an `OK` / `FAIL` / `SKIP` summary at the end. Steps
-are independent — one failing does not abort the rest — and the script exits
-non-zero if any step failed. It never reboots.
+tasks in one pass — plus a fifth, driver updates, with `-DriverUpdate` — and
+prints an `OK` / `FAIL` / `SKIP` summary at the end. Steps are independent — one
+failing does not abort the rest — and the script exits non-zero if any step
+failed. It never reboots.
 
 **Each step runs in its own console window.** The orchestrator re-invokes the
 script with an internal `-RunStep <name>` per step, waits for it, and reads a
@@ -89,18 +90,21 @@ directory (`%TEMP%\windows_maintenance_<timestamp>\<Step>\`) is kept afterward.
 Windows PowerShell 5.1 may not capture native-EXE output in full — the live
 window always shows everything.)
 
-It does **not** require elevation to start. Windows Update, Disk Cleanup and
-defrag need Administrator; if any of them is going to run and the session is not
-elevated, the script **relaunches itself elevated in a new console** (one UAC
-prompt), runs there, mirrors that run's exit code, and leaves the window open at
-the end so the summary is readable. `-NoElevate` suppresses the relaunch — those
-steps are then marked `SKIP` (not `FAIL`) and the run exits non-zero. The winget
-step needs no elevation of its own (without it, only user-scope packages are
-upgraded). An explicit `-Skip…` always wins over both.
+It does **not** require elevation to start. Windows Update, driver updates, Disk
+Cleanup and defrag need Administrator; if any of them is going to run and the
+session is not elevated, the script **relaunches itself elevated in a new
+console** (one UAC prompt), runs there, mirrors that run's exit code, and leaves
+the window open at the end so the summary is readable. `-NoElevate` suppresses
+the relaunch — those steps are then marked `SKIP` (not `FAIL`) and the run exits
+non-zero. The winget step needs no elevation of its own (without it, only
+user-scope packages are upgraded). An explicit `-Skip…` always wins over both.
 
 ```powershell
 # full pass — prompts for elevation if not already admin
 .\scripts\maintenance\windows_maintenance.ps1
+
+# also install Windows Update driver updates (verified/WHQL only)
+.\scripts\maintenance\windows_maintenance.ps1 -DriverUpdate
 
 # no elevation, no UAC prompt: just upgrade user-scope winget packages
 .\scripts\maintenance\windows_maintenance.ps1 -NoElevate -SkipWindowsUpdate -SkipDiskCleanup -SkipDefrag
@@ -138,7 +142,15 @@ upgraded). An explicit `-Skip…` always wins over both.
    NTFS/ReFS volume with a drive letter, with no operation switch so Windows
    picks the media-appropriate action per volume (defrag on HDD, retrim on SSD),
    same as the built-in "Optimize Drives" task / `defrag /O`.
+5. **Driver updates** *(only with `-DriverUpdate`)* — `Get-WindowsUpdate
+   -UpdateType Driver -Install` via the same PSWindowsUpdate module as step 1.
+   This is the "verified drivers only" path: every driver on Windows Update is
+   WHQL-certified and submitted by the hardware vendor through Microsoft's
+   Hardware Dev Center — unlike Driver Booster and similar, which pull from
+   their own unvetted repositories. Off by default (driver updates carry more
+   regression risk); reboots suppressed and reported like step 1.
 
+- `-DriverUpdate` — add step 5 (Windows Update driver updates). Off by default.
 - `-SkipWindowsUpdate`, `-SkipWinget`, `-SkipDiskCleanup`, `-SkipDefrag` — skip
   the matching step. An explicit skip wins over the elevation logic: if it
   leaves no admin-only step to run, there is no relaunch and no non-zero exit.
