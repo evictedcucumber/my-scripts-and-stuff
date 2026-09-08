@@ -6,19 +6,21 @@ does, how to configure it, and its requirements.
 
 ## scripts/archive/archive_directory.ps1
 
-Windows-side helper that recursively compresses a directory into a single `.7z`
-archive using 7-Zip's strongest lossless settings (LZMA2, `-mx=9`, `-mfb=273`, a
-large dictionary, solid, sort-by-type) and drops it in the current user's
-Downloads folder as `YYYY-MM-DD.7z` (today's local date). The named directory
-becomes the archive's top-level entry.
+Windows-side helper that recursively compresses a directory's contents into a
+single `.7z` archive using 7-Zip's strongest lossless settings (LZMA2, `-mx=9`,
+`-mfb=273`, a large dictionary, solid, sort-by-type) and drops it in the current
+user's Downloads folder as `YYYY-MM-DD.7z` (today's local date). Names are stored
+relative to the directory, so archiving `C:\projects\foo` puts `bar\baz` at the
+archive root, not `foo\bar\baz`.
 
 ```powershell
-# archives C:\projects\foo -> %USERPROFILE%\Downloads\2026-09-05.7z
+# archives the contents of C:\projects\foo -> %USERPROFILE%\Downloads\2026-09-05.7z
 .\scripts\archive\archive_directory.ps1 C:\projects\foo
 ```
 
-- `-Path <dir>` (position 0, required) — the directory to archive; relative or
-  absolute.
+- `-Path <dir>` (position 0, required) — the directory whose contents to
+  archive; relative or absolute. The directory's own name is not kept as a path
+  prefix inside the archive; an empty directory is rejected.
 - `-DestinationDirectory <dir>` — where to write the archive; defaults to the
   Downloads known folder (registry-resolved, falling back to
   `%USERPROFILE%\Downloads`).

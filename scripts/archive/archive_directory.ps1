@@ -1,12 +1,13 @@
 <#
 .SYNOPSIS
-    Compresses a directory into a maximum-compression 7-Zip archive placed in
-    the current user's Downloads folder, named YYYY-MM-DD.7z.
+    Compresses the contents of a directory into a maximum-compression 7-Zip
+    archive placed in the current user's Downloads folder, named YYYY-MM-DD.7z.
 
 .DESCRIPTION
-    Recursively archives the given directory (the folder itself becomes the
-    archive's top-level entry) into a .7z file using 7-Zip's strongest
-    lossless settings: LZMA2, ultra level (-mx=9), maximum fast bytes
+    Recursively archives the contents of the given directory - names are stored
+    relative to that directory, so archiving C:\projects\foo puts "bar\baz" at
+    the archive root, not "foo\bar\baz" - into a .7z file using 7-Zip's
+    strongest lossless settings: LZMA2, ultra level (-mx=9), maximum fast bytes
     (-mfb=273), a large dictionary, a solid archive, and sort-by-type.
 
     The archive is written to the user's Downloads folder - resolved from the
@@ -20,6 +21,8 @@
 
 .PARAMETER Path
     The directory to archive. Required; accepts a relative or absolute path.
+    Its contents are archived; the directory's own name is not kept as a path
+    prefix inside the archive.
 
 .PARAMETER DestinationDirectory
     Where to write the archive. Defaults to the current user's Downloads
@@ -129,11 +132,23 @@ if (-not (Test-Path -LiteralPath $sourcePath -PathType Container)) {
     exit 1
 }
 
+if (-not (Get-ChildItem -LiteralPath $sourcePath -Force -ErrorAction SilentlyContinue)) {
+    Write-Error "Directory is empty, nothing to archive: $sourcePath"
+    exit 1
+}
+
 $sourcePath = $sourcePath.TrimEnd('\')
 if ($sourcePath -match '^[A-Za-z]:$') {
     # A drive root trimmed to "C:" would mean "current dir on C:" to 7-Zip.
     $sourcePath += '\'
 }
+
+# Archive the directory's *contents*, not the directory itself: 7-Zip stores
+# names relative to the folder that holds the wildcard, so "<dir>\*" yields
+# "subdir\file", not "<dir>\subdir\file". PowerShell passes "*" through
+# literally (no shell glob), so 7-Zip does its own expansion and still picks up
+# hidden/dotfile entries.
+$sourceSpec = Join-Path $sourcePath '*'
 
 if (-not $DestinationDirectory) {
     $DestinationDirectory = Get-DownloadsFolder
@@ -187,15 +202,15 @@ $sevenZipArgs = @(
     '-bsp1'
     '--'
     $archivePath
-    $sourcePath
+    $sourceSpec
 )
 
-Write-Output "Source:  $sourcePath"
+Write-Output "Source:  $sourcePath (contents)"
 Write-Output "Archive: $archivePath"
 Write-Output "7-Zip:   $sevenZip"
 Write-Output "Compressing at -mx=9 (this can take a while)..."
 
-if (-not $PSCmdlet.ShouldProcess($archivePath, "Create 7-Zip archive of $sourcePath")) {
+if (-not $PSCmdlet.ShouldProcess($archivePath, "Create 7-Zip archive of $sourcePath (contents)")) {
     return
 }
 
