@@ -128,11 +128,19 @@ user-scope packages are upgraded). An explicit `-Skip…` always wins over both.
    (`0x8A15002B`) counts as success. When elevated, any other non-zero exit
    fails the step; when not elevated it is downgraded to a warning (winget
    can't touch machine-scope packages without Administrator).
+   Packages listed in `winget_ignore.txt`, next to the script, are
+   `--exclude`d from the upgrade — copy
+   [`winget_ignore.sample.txt`](scripts/maintenance/winget_ignore.sample.txt)
+   to `winget_ignore.txt` (same folder) and list one winget package `Id` per
+   line (`#` comments and blank lines allowed); the file is optional and
+   nothing is excluded on its account if it's absent.
    If a WSL distro is running (checked via `vmmemWSL` / `wsl -l --running`),
-   `Microsoft.WSL` is `--exclude`d from the upgrade — upgrading it runs
-   `wsl --shutdown` and would drop live sessions; the summary notes it was
-   held back. On a winget too old for `--exclude`, if a WSL upgrade is
-   pending the whole step is marked `SKIP` instead.
+   `Microsoft.WSL` is also `--exclude`d — upgrading it runs `wsl --shutdown`
+   and would drop live sessions; the summary notes it was held back. On a
+   winget too old for `--exclude`: a configured ignore list is skipped with a
+   warning (upgrade proceeds), but a pending WSL upgrade instead marks the
+   whole step `SKIP`, since dropping a live session is worse than an
+   unexcluded package.
 3. **Disk Cleanup (C:) + component store** — writes `StateFlags<profile>` for
    every Disk Cleanup handler **except "Downloads Folder"** under
    `...\Explorer\VolumeCaches`, runs `cleanmgr /sagerun:<profile>` and waits for
@@ -171,7 +179,8 @@ Requires: Windows 10/11 (or matching Server), PowerShell 5.1+. No
 `#Requires -RunAsAdministrator` — the script self-elevates when an admin-only
 step is due (or, with `-NoElevate`, skips it). Internet access for steps 1–2;
 `winget` (App Installer) on `PATH`; `cleanmgr.exe` and `DISM` (both in-box,
-though cleanmgr is an optional Feature on Server). PSScriptAnalyzer note:
+though cleanmgr is an optional Feature on Server). `winget_ignore.txt` next to
+the script is optional (see step 2 above). PSScriptAnalyzer note:
 `Get-Date`, `Get-Volume`, `Optimize-Volume`, `Get-WindowsUpdate` etc. are
 Windows-only and not resolvable on the Linux CI linter, which is fine — the
 default ruleset does not check command existence.

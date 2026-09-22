@@ -46,11 +46,18 @@
          elevated it is downgraded to a warning, since winget cannot upgrade
          machine-scope packages without Administrator.
 
+         Packages listed in winget_ignore.txt, next to this script (see
+         winget_ignore.sample.txt), are passed as --exclude and skipped by
+         the upgrade. The file is optional; if it is absent, nothing is
+         excluded on its account.
+
          If a WSL distribution is running, the WSL package (Microsoft.WSL) is
-         excluded from the upgrade (--exclude) - upgrading it runs
+         also excluded from the upgrade (--exclude) - upgrading it runs
          "wsl --shutdown" and would drop live sessions. If this winget build
-         has no --exclude and a WSL upgrade is pending, the whole step is
-         marked SKIP rather than risk the shutdown.
+         has no --exclude: a configured ignore list is skipped with a
+         warning and the upgrade proceeds anyway; a pending WSL upgrade
+         instead marks the whole step SKIP, since dropping a live session is
+         worse than an unexcluded package.
 
       3. Disk Cleanup (C:) + component store
          Enables every Disk Cleanup handler except "Downloads Folder" by
@@ -131,7 +138,9 @@
       - winget: App Installer / winget (in-box on Windows 11 and current
         Windows 10). Machine-scope upgrades need Administrator. The WSL
         hold-back also calls wsl.exe (with WSL_UTF8=1) to see if a distro is
-        running.
+        running. Optional winget_ignore.txt next to the script (see
+        winget_ignore.sample.txt) excludes listed package Ids from the
+        upgrade.
       - Disk Cleanup (needs Administrator): cleanmgr.exe (an optional Feature on
         Server SKUs) and DISM - the step carries on if cleanmgr is missing.
       - Optimize-Volume (needs Administrator): the Storage module (in-box).
@@ -629,6 +638,31 @@ function Test-WingetUpgradeAvailable {
     return ($LASTEXITCODE -eq 0 -and (($out -join "`n") -match [regex]::Escape($Id)))
 }
 
+function Get-WingetIgnoreList {
+    # Reads winget_ignore.txt next to this script: one winget package Id per
+    # line (the "Id" column from `winget list`/`winget upgrade`), "#" comments
+    # and blank lines ignored. Optional - see winget_ignore.sample.txt.
+    param(
+        [Parameter(Mandatory)] [string] $Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return @()
+    }
+
+    $ids = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        $trimmed = $line.Trim()
+        if ($trimmed -eq '' -or $trimmed.StartsWith('#')) {
+            continue
+        }
+        if ($ids -notcontains $trimmed) {
+            $ids.Add($trimmed)
+        }
+    }
+    return $ids.ToArray()
+}
+
 function Invoke-WingetUpgrade {
     $winget = Resolve-Winget
     if (-not $winget) {
@@ -648,21 +682,42 @@ function Invoke-WingetUpgrade {
         '--disable-interactivity'
     )
 
+    $ignoreFile = Join-Path $PSScriptRoot 'winget_ignore.txt'
+    $configIgnoreList = Get-WingetIgnoreList -Path $ignoreFile
+
     # Hold the WSL package back while a distro is running - upgrading it runs
     # "wsl --shutdown" and would drop live sessions.
     $wslPackageId = 'Microsoft.WSL'
+    $wslUpgradePending = (Test-WslRunning) -and (Test-WingetUpgradeAvailable -Winget $winget -Id $wslPackageId)
+
+    $excludeList = [System.Collections.Generic.List[string]]::new()
+    $excludeList.AddRange([string[]]$configIgnoreList)
+    if ($wslUpgradePending -and -not $excludeList.Contains($wslPackageId)) {
+        $excludeList.Add($wslPackageId)
+    }
+
     $wslHeldBack = $false
-    if (Test-WslRunning) {
+    if ($excludeList.Count -gt 0) {
         if (Test-WingetSupportsExclude -Winget $winget) {
-            $wingetArgs += @('--exclude', $wslPackageId)
-            $wslHeldBack = Test-WingetUpgradeAvailable -Winget $winget -Id $wslPackageId
-            Write-Output "WSL is running - excluding $wslPackageId from this upgrade."
+            foreach ($id in $excludeList) {
+                $wingetArgs += @('--exclude', $id)
+            }
+            if ($configIgnoreList.Count -gt 0) {
+                Write-Output "Excluding configured package(s) ($ignoreFile): $($configIgnoreList -join ', ')"
+            }
+            if ($wslUpgradePending) {
+                $wslHeldBack = $true
+                Write-Output "WSL is running - excluding $wslPackageId from this upgrade."
+            }
         }
-        elseif (Test-WingetUpgradeAvailable -Winget $winget -Id $wslPackageId) {
+        elseif ($wslUpgradePending) {
             $script:StepStatus = 'SKIP'
             $script:StepDetail = "held back: WSL is running with a pending $wslPackageId upgrade and this winget build has no --exclude; run 'wsl --shutdown' first or upgrade WSL manually"
             Write-Warning $script:StepDetail
             return
+        }
+        else {
+            Write-Warning "This winget build has no --exclude; the configured ignore list ($($configIgnoreList -join ', ')) will not be applied this run."
         }
     }
 

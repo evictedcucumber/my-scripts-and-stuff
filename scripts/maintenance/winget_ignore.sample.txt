@@ -1,0 +1,14 @@
+# windows_maintenance.ps1 - winget upgrade ignore list.
+#
+# One winget package Id per line - the "Id" column from `winget list` or
+# `winget upgrade` (not the display name). Blank lines and lines starting
+# with "#" are ignored.
+#
+# Copy this file to winget_ignore.txt in the same folder and edit it there.
+# windows_maintenance.ps1 looks for winget_ignore.txt next to itself and
+# treats it as empty if that file doesn't exist - the sample file itself is
+# never read.
+#
+# Example:
+# Discord.Discord
+# Valve.Steam
