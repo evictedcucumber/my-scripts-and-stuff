@@ -43,19 +43,34 @@
     Pass -Remove to unregister the task and delete the generated VBScript
     wrapper. attach_yubikey.ps1 is left in place.
 
+    Supports -WhatIf / -Confirm: enabling the event log, writing the wrapper,
+    registering the task, and the -Remove teardown each report what they would
+    do and change nothing under -WhatIf.
+
 .PARAMETER Remove
     Unregister the scheduled task and delete the generated VBScript wrapper
     instead of registering.
 
+.EXAMPLE
+    .\register_yubikey_attach_task.ps1
+
+    Registers (or refreshes) the AttachYubiKeyToWSL scheduled task.
+
+.EXAMPLE
+    .\register_yubikey_attach_task.ps1 -Remove
+
+    Unregisters the task and deletes the generated VBScript wrapper.
+
 .NOTES
-    Requirements: Windows Task Scheduler (ScheduledTasks module, built in),
-    run elevated. attach_yubikey.ps1 must already be deployed at
-    %USERPROFILE%\Documents\Scripts\attach_yubikey.ps1.
+    Requirements: Windows, PowerShell 5.1+, Windows Task Scheduler
+    (ScheduledTasks module, built in), run elevated. attach_yubikey.ps1 must
+    already be deployed at %USERPROFILE%\Documents\Scripts\attach_yubikey.ps1.
 #>
 
+#Requires -Version 5.1
 #Requires -RunAsAdministrator
 
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess)]
 param(
     [switch]$Remove
 )
@@ -99,16 +114,20 @@ if (-not (Get-Module -ListAvailable -Name ScheduledTasks)) {
 
 if ($Remove) {
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-        Write-Output "Unregistered scheduled task '$TaskName'."
+        if ($PSCmdlet.ShouldProcess($TaskName, 'Unregister scheduled task')) {
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+            Write-Output "Unregistered scheduled task '$TaskName'."
+        }
     }
     else {
         Write-Output "Scheduled task '$TaskName' not present."
     }
 
     if (Test-Path -LiteralPath $HiddenWrapperScript) {
-        Remove-Item -LiteralPath $HiddenWrapperScript -Force
-        Write-Output "Removed $HiddenWrapperScript"
+        if ($PSCmdlet.ShouldProcess($HiddenWrapperScript, 'Delete VBScript wrapper')) {
+            Remove-Item -LiteralPath $HiddenWrapperScript -Force
+            Write-Output "Removed $HiddenWrapperScript"
+        }
     }
 
     exit 0
@@ -143,7 +162,7 @@ if ($null -eq $log) {
     exit 1
 }
 
-if (-not $log.IsEnabled) {
+if (-not $log.IsEnabled -and $PSCmdlet.ShouldProcess($EventLogName, 'Enable event log channel')) {
     try {
         $log.IsEnabled = $true
         $log.SaveChanges()
@@ -216,7 +235,7 @@ function Test-HiddenWrapper {
 if (Test-HiddenWrapper -Path $HiddenWrapperScript -ExpectedContent $vbsContent) {
     Write-Output "VBScript wrapper is current: $HiddenWrapperScript"
 }
-else {
+elseif ($PSCmdlet.ShouldProcess($HiddenWrapperScript, 'Write VBScript wrapper')) {
     # UTF-16LE (with BOM) so wscript reads the paths correctly even if the
     # username / deployment path contains non-ASCII characters.
     Set-Content -LiteralPath $HiddenWrapperScript -Value $vbsContent -Encoding Unicode
@@ -260,7 +279,17 @@ $settings = New-ScheduledTaskSettingsSet `
 # Register (idempotent: -Force replaces any existing task of the same name)
 # ---------------------------------------------------------------------------
 
-Register-ScheduledTask -TaskName $TaskName -Description $TaskDescription `
-    -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+if ($PSCmdlet.ShouldProcess($TaskName, 'Register scheduled task')) {
+    $registerArgs = @{
+        TaskName    = $TaskName
+        Description = $TaskDescription
+        Action      = $action
+        Trigger     = $trigger
+        Principal   = $principal
+        Settings    = $settings
+        Force       = $true
+    }
+    Register-ScheduledTask @registerArgs | Out-Null
 
-Write-Output "Scheduled task '$TaskName' registered: runs $AttachScript (hidden, as $TaskUserId) on USB device connect."
+    Write-Output "Scheduled task '$TaskName' registered: runs $AttachScript (hidden, as $TaskUserId) on USB device connect."
+}

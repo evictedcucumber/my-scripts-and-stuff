@@ -5,11 +5,12 @@ describes the repo layout and how to work in it; [README.md](../../README.md)
 documents what each script does; these documents define **what a script must look
 like**.
 
-> **Status: defined, not yet applied.** These documents were written on
-> 2026-09-29 by reviewing the existing scripts, CI, and hooks. They describe the
-> target state. Nothing in the repo has been changed to conform yet, and some
-> existing files deviate. The deviations, and the tooling that would enforce each
-> rule, are tracked in [adoption.md](adoption.md).
+> **Status: applied.** These documents were written on 2026-09-29 by reviewing
+> the existing scripts, CI, and hooks. Later the same day every script was
+> reviewed against them and brought into line; what was changed, and the few
+> items still open, are in [adoption.md](adoption.md). Automated enforcement is
+> still limited to `shellcheck` and PSScriptAnalyzer; everything else is held by
+> review.
 
 ## Documents
 

@@ -1,3 +1,4 @@
 *.7z
 .claude
 .direnv
+scripts/maintenance/winget_ignore.txt

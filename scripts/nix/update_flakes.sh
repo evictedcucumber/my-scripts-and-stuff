@@ -14,7 +14,14 @@
 # commit never swallows unrelated work). Only flake.lock files are committed;
 # other staged or unstaged changes in the repo are left alone.
 #
-# Usage: update_flakes.sh [-h|--help] [IGNORE...]
+# Exits 1 if any flake failed to update or any commit failed; skipped flakes
+# are reported but do not fail the run.
+#
+# Usage:
+#   update_flakes.sh [options] [--] [IGNORE...]
+#
+# Options:
+#   -h, --help   Show this help.
 #
 # Each IGNORE is a directory to leave out (with everything beneath it):
 #   - an absolute path            (/home/me/repos/homelab/lab)
@@ -23,6 +30,9 @@
 #   - a bare name, which matches any directory with that name under the root
 #                                 (homelab skips ~/repos/homelab and anything
 #                                 else called homelab)
+#
+# Environment:
+#   REPOS_DIR   Directory to search (default: ~/repos).
 #
 # Requirements: nix (with flakes enabled), git, find, realpath
 #
@@ -36,7 +46,28 @@ set -euo pipefail
 ROOT="${REPOS_DIR:-$HOME/repos}"
 
 usage() {
-  sed -n '2,/^set -euo/{/^set -euo/d;s/^# \{0,1\}//;p}' "${BASH_SOURCE[0]}"
+  cat <<'EOF'
+Usage: update_flakes.sh [options] [--] [IGNORE...]
+
+Run `nix flake update` for every flake.nix under ~/repos and commit the
+resulting flake.lock change as "chore(flake): sync YYYY-MM-DD". Never pushes.
+
+Options:
+  -h, --help   Show this help.
+
+Each IGNORE is a directory to leave out (with everything beneath it):
+  - an absolute path            (/home/me/repos/homelab/lab)
+  - a path relative to $PWD     (../repos/homelab/lab, ./lab), or relative to
+                                the search root (homelab/lab)
+  - a bare name, which matches any directory with that name under the root
+                                (homelab skips ~/repos/homelab and anything
+                                else called homelab)
+
+Environment:
+  REPOS_DIR   Directory to search (default: ~/repos).
+
+Exits 1 if any flake failed to update or any commit failed.
+EOF
 }
 
 # ---------------------------------------------------------------------------
@@ -90,15 +121,37 @@ is_ignored() {
 }
 
 # ---------------------------------------------------------------------------
-# Args + sanity checks
+# Arguments
 # ---------------------------------------------------------------------------
 
-for arg in "$@"; do
-  if [[ "$arg" == "-h" || "$arg" == "--help" ]]; then
-    usage
-    exit 0
-  fi
+IGNORE_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      IGNORE_ARGS+=("$@")
+      break
+      ;;
+    -*)
+      echo "Error: unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      IGNORE_ARGS+=("$1")
+      shift
+      ;;
+  esac
 done
+
+# ---------------------------------------------------------------------------
+# Sanity checks
+# ---------------------------------------------------------------------------
 
 for cmd in nix git find realpath; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -113,7 +166,7 @@ if [[ ! -d "$ROOT" ]]; then
 fi
 ROOT="$(realpath -- "$ROOT")"
 
-for arg in "$@"; do
+for arg in "${IGNORE_ARGS[@]}"; do
   add_ignore "$arg"
 done
 
@@ -147,7 +200,7 @@ REPO_ORDER=()      # repo toplevels, in first-seen order
 declare -A REPO_LOCKS=() # toplevel -> newline-separated updated flake.lock paths
 
 update_flake() {
-  ( cd "$1" && nix flake update )
+  ( cd -- "$1" && nix flake update )
 }
 
 for flake_file in "${FLAKE_FILES[@]}"; do
@@ -167,8 +220,12 @@ for flake_file in "${FLAKE_FILES[@]}"; do
     continue
   fi
 
-  git_dir="$(git -C "$dir" rev-parse --path-format=absolute --git-dir)"
-  common_dir="$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir)"
+  if ! git_dir="$(git -C "$dir" rev-parse --path-format=absolute --git-dir)" ||
+    ! common_dir="$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir)"; then
+    echo "WARNING: 'git rev-parse' failed in $dir" >&2
+    FAILED+=("$dir (git rev-parse)")
+    continue
+  fi
   if [[ "$git_dir" != "$common_dir" ]]; then
     echo "Skipping: linked git worktree"
     SKIPPED+=("$dir (linked worktree)")
@@ -190,7 +247,7 @@ for flake_file in "${FLAKE_FILES[@]}"; do
   fi
 
   if ! update_flake "$dir"; then
-    echo "WARNING: 'nix flake update' failed in $dir"
+    echo "WARNING: 'nix flake update' failed in $dir" >&2
     FAILED+=("$dir (nix flake update)")
     continue
   fi
@@ -221,13 +278,13 @@ for top in "${REPO_ORDER[@]}"; do
   fi
 
   if ! git -C "$top" add -- "${locks[@]}"; then
-    echo "WARNING: 'git add' failed in $top"
+    echo "WARNING: 'git add' failed in $top" >&2
     FAILED+=("$top (git add)")
     continue
   fi
 
   if ! git -C "$top" commit -m "$COMMIT_MESSAGE" -- "${locks[@]}"; then
-    echo "WARNING: 'git commit' failed in $top"
+    echo "WARNING: 'git commit' failed in $top" >&2
     FAILED+=("$top (git commit)")
     continue
   fi

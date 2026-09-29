@@ -49,6 +49,11 @@ scripts depend on (`gh`, `git`, `jq`, `lefthook`, `p7zip`, `powershell`, `shellc
 
 ## Bash standards
 
+The "Bash standards" and "PowerShell standards" sections below are a condensed
+summary. The full rules, with stable IDs (`GEN-`, `SH-`, `PS-`), live in
+[docs/standards/](docs/standards/README.md); change them there first and keep
+these summaries in step.
+
 Every script here should follow these conventions (matches the existing scripts):
 
 - Shebang `#!/usr/bin/env bash`, and `set -euo pipefail` near the top.

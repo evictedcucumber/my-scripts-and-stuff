@@ -2,7 +2,8 @@
 
 A repository with all my scripts. See [CLAUDE.md](CLAUDE.md) for repo layout and
 conventions for writing/maintaining scripts. This file documents what each script
-does, how to configure it, and its requirements.
+does, how to configure it, and its requirements. The rules every script must
+follow are in [docs/standards/](docs/standards/README.md).
 
 ## scripts/archive/archive_directory.ps1
 
@@ -44,7 +45,18 @@ force-fetches all tags, checks out submodules, and creates local tracking
 branches for every remote branch, so the resulting archive is a self-contained,
 browsable set of working trees — not a bare mirror. After creation the archive
 is verified (`7z t`) and `chmod 600`ed; the run aborts up front if the target
-archive already exists, and errors out if *every* repo fails.
+archive already exists, and errors out if *every* repo fails. If only *some*
+repos fail, the archive is still created from the rest, the failures are listed
+on stderr, and the script **exits 1** so an incomplete backup is never mistaken
+for a good one.
+
+```bash
+./scripts/git/github_backup.sh                                   # back up OWNER's repos into $PWD
+OWNER=someone OUTPUT_DIR=~/backups ./scripts/git/github_backup.sh
+```
+
+Takes no arguments; `-h, --help` prints the usage and any other argument is
+rejected.
 
 Requires: `gh` (authenticated — `gh auth status`), `git`, `7z`, `jq`.
 
@@ -88,8 +100,8 @@ do, with the destructive parts (Disk Cleanup empties the Recycle Bin; component
 store cleanup drops superseded component versions) and the disruptive parts
 (`wsl --shutdown` ends every running WSL session and anything that depends on it,
 including a WSL shell you may have started the script from; winget may close
-running apps) called out, and asks `Proceed? [y/N]`. Declining exits without
-changing anything. `-Yes` skips the question (the plan is still printed) and is
+running apps) called out, and asks `Proceed? [y/N]`. Declining exits with code 1
+without changing anything. `-Yes` skips the question (the plan is still printed) and is
 required for unattended runs — a non-interactive session without it declines.
 After you confirm, it warns about an already-pending reboot and nearly-full
 volumes, and creates a System Restore point (`-SkipRestorePoint` to skip;
@@ -301,7 +313,8 @@ update_flakes.sh homelab ~/repos/foo ../bar       # ...but leave those out
   (`homelab/lab`), or a bare name, which matches any directory with that name
   under the search root.
 - `REPOS_DIR` — env var; directory to search instead of `~/repos`.
-- `-h, --help` — print the header comment.
+- `-h, --help` — print the usage. Any other option starting with `-` is an
+  error; use `--` before an `IGNORE` that itself starts with `-`.
 
 Safety behaviour: each repo gets one commit containing only its `flake.lock`
 file(s) — other staged/unstaged changes are left alone and no commit is made if
@@ -324,14 +337,18 @@ preserved, mode/ownership are not (they don't map onto the Windows filesystem).
 ```bash
 copy_to_downloads.sh ~/reports/2026-09        # -> C:\Users\me\Downloads\2026-09
 copy_to_downloads.sh --force ./build/app.zip
+copy_to_downloads.sh --dry-run --force ./build/app.zip   # preview, change nothing
 ```
 
 - `<wsl-path>` (positional, required) — the file or directory to copy.
 - `-d, --dest DIR` — destination directory instead of Downloads; accepts a WSL
   path or a Windows path (`C:\...`). Also settable via `WIN_DOWNLOADS_DIR`.
 - `-f, --force` — replace an existing item of the same name (otherwise the copy
-  is refused).
+  is refused). The existing item is deleted with `rm -rf` before the copy.
+- `-n, --dry-run` — run every check and print what would be copied (and
+  replaced), but change nothing.
 - `-v, --verbose` — pass `-v` to `cp`.
+- `WIN_DOWNLOADS_DIR` — env var; same as `--dest`, which wins if both are given.
 
 Requires: WSL (`wslpath`), coreutils; `powershell.exe` / `cmd.exe` for Downloads
 autodetection (not needed when `--dest` / `WIN_DOWNLOADS_DIR` is given).
@@ -343,10 +360,13 @@ Windows-side helper (not run from WSL/bash) that finds a connected YubiKey via
 `usbipd attach --wsl --busid <id>`. Skips the attach if the device is already
 `Attached`; if the device has never been shared it runs `usbipd bind --busid
 <id>` first (one-time, persistent). No-ops with a message if no matching device
-is found, and exits non-zero if `usbipd list` itself fails.
+is found, and exits non-zero if `usbipd list` itself fails. Supports `-WhatIf` /
+`-Confirm`: the bind and the attach are the only changes it makes, and neither
+runs under `-WhatIf`.
 
-Requires: [usbipd-win](https://github.com/dorssel/usbipd-win), run from an elevated
-PowerShell prompt (`usbipd bind`/`attach` need Administrator).
+Requires: Windows PowerShell 5.1+, [usbipd-win](https://github.com/dorssel/usbipd-win),
+run from an elevated PowerShell prompt (`usbipd bind`/`attach` need
+Administrator).
 
 Run manually whenever the YubiKey needs to (re)appear inside WSL, e.g. after a
 replug or reboot — not scheduled or hooked into anything automatically. To
@@ -358,7 +378,10 @@ Windows-side, run once (and re-run any time to update): idempotently registers a
 Scheduled Task (`AttachYubiKeyToWSL`) that runs `attach_yubikey.ps1` whenever any
 USB device is connected, so plugging in the YubiKey auto-attaches it to WSL with
 no manual step. Run with `-Remove` to unregister the task and delete the
-generated VBScript wrapper (`attach_yubikey.ps1` is left in place).
+generated VBScript wrapper (`attach_yubikey.ps1` is left in place). Supports
+`-WhatIf` / `-Confirm`: enabling the event log, writing the wrapper, registering
+the task and the `-Remove` teardown each report what they would do and change
+nothing under `-WhatIf`.
 
 - Expects `attach_yubikey.ps1` to already be deployed at
   `%USERPROFILE%\Documents\Scripts\attach_yubikey.ps1` — copy it there before
@@ -390,7 +413,7 @@ generated VBScript wrapper (`attach_yubikey.ps1` is left in place).
   same name, so re-running after editing either script (or moving the repo) just
   updates the registered task in place.
 
-Requires: Windows Task Scheduler (`ScheduledTasks` module, built in), run from an
-elevated PowerShell prompt. Expects `attach_yubikey.ps1` to already be deployed
+Requires: Windows PowerShell 5.1+, Windows Task Scheduler (`ScheduledTasks`
+module, built in), run from an elevated PowerShell prompt. Expects `attach_yubikey.ps1` to already be deployed
 at `%USERPROFILE%\Documents\Scripts\attach_yubikey.ps1` — copy it there before
 running this script.

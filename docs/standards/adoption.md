@@ -1,11 +1,13 @@
 # Adoption status
 
 Where the repository stands against the [standards](README.md): what is enforced
-automatically today, what could be, and where existing files deviate. This is the
-worklist for bringing the repo into line. **Nothing here has been implemented yet.**
+automatically today, what could be, and what was changed to bring the existing
+scripts into line. **The scripts conform except for the [open items](#open-items); the
+enforcement tooling proposed below has not been implemented.**
 
-Snapshot taken 2026-09-29 against commit `ae96cb3`. Update it whenever a deviation
-is fixed or a new rule is added.
+Snapshot taken 2026-09-29 against commit `6a1c9cf` plus the conformance changes
+described under [Deviations fixed](#deviations-fixed). Update it whenever a
+deviation is fixed or a new rule is added.
 
 ## What is enforced today
 
@@ -63,45 +65,89 @@ Listed in rough order of value for effort. Each would be its own change.
    workflow file. If items 3 or 4 add a config file or a conformance script, add it
    to the `paths:` lists so a change to it re-runs the checks.
 
-## Known deviations in existing files
+## Deviations fixed
 
-Found while writing the standards; none has been fixed. "Severity" follows the
-rule's keyword.
+The first review (commit `ae96cb3`) listed the deviations that were fixed first;
+a second, full review on the same day, covering the scripts added since and
+checking every rule by hand and with tooling, found more (marked *new*).
 
 ### MUST rules
 
-| Rule | File | Deviation |
-| --- | --- | --- |
-| `GEN-42` | `scripts/maintenance/windows_maintenance.ps1` | Reads `winget_ignore.txt` next to the script, but `.gitignore` only lists `*.7z` and `.direnv`, so a local copy is not ignored and could be committed. Add `scripts/maintenance/winget_ignore.txt`. |
-| `GEN-50`, `SH-22` | `scripts/git/github_backup.sh:203`, `:209`, `:220-221`, and the failure summary | `WARNING: failed to clone/prepare ...` and the "The following repos failed:" list are written to stdout. Warnings and error listings belong on stderr (the `--limit` warning at `:106` already does this). |
-| `SH-17` | `scripts/git/github_backup.sh:61-62` | `mkdir -p "$OUTPUT_DIR"` and `cd "$OUTPUT_DIR"` take a user-supplied path without `--`; `OUTPUT_DIR` starting with `-` would be read as an option. (Later paths derive from the resulting absolute path, so they are safe.) |
-| `PS-02` | `scripts/wsl/attach_yubikey.ps1`, `scripts/wsl/register_yubikey_attach_task.ps1` | Have `#Requires -RunAsAdministrator` but no `#Requires -Version 5.1`. |
-
-`SH-01`, `SH-04`, `SH-05`, `SH-13`, `SH-14`, `SH-24`, `SH-25`, `GEN-10`, `GEN-11`,
-`GEN-16`, `PS-04`, `PS-05`, `PS-30`, `PS-40` were checked against the existing
-files and hold: the Bash scripts use the `env` shebang, `set -euo pipefail`, `[[ ]]`
-and `$(...)` only, and are `100755`; every script is ASCII, LF, ends in a newline
-and has no trailing whitespace; the PowerShell scripts set strict mode and `Stop`,
-avoid `Write-Host`, and use `-LiteralPath`.
+| Rule | File | What was wrong | Fix |
+| --- | --- | --- | --- |
+| `GEN-42` | `windows_maintenance.ps1` | Local `winget_ignore.txt` was not git-ignored. | Added `scripts/maintenance/winget_ignore.txt` to `.gitignore`. |
+| `GEN-50`, `SH-22` | `github_backup.sh` | `WARNING:` lines and the failed-repo list went to stdout. | Now stderr. |
+| `SH-17` | `github_backup.sh` | `mkdir`/`cd` on user-supplied `OUTPUT_DIR` without `--`. | Added `--` (also on `cd`, `rm -rf`, `chmod`). |
+| `PS-02` | `attach_yubikey.ps1`, `register_yubikey_attach_task.ps1` | No `#Requires -Version 5.1`. | Added. |
+| `GEN-30`, `SH-23` (*new*) | `github_backup.sh` | Exited `0` when some (not all) repos failed, so an incomplete backup looked good. | Archive is still created, failures are listed, and the script exits `1`. Header and README say so. |
+| `SH-30` (*new*) | `update_flakes.sh` | Hand-rolled argument loop: no `--`, and an unknown `-x` was silently treated as an ignore path. | `while`/`case` parser: `-h`/`--help`, `--`, unknown `-*` rejected with usage and exit `1`. |
+| `GEN-50`, `SH-22` (*new*) | `update_flakes.sh` | `WARNING:` lines to stdout. | Now stderr. |
+| `GEN-32` (*new*) | `update_flakes.sh` | A failing `git rev-parse` would abort the whole run under `set -e`. | Recorded in `FAILED` and the loop continues. |
+| `SH-17` (*new*) | `update_flakes.sh` | `cd "$1"` without `--`. | Added. |
+| `SH-04`, `GEN-40`, `GEN-41` (*new*) | `github_backup.sh`, `update_flakes.sh`, `copy_to_downloads.sh` | Header had no `Environment:` list; `github_backup.sh` documented the `7z -p` password exposure only in a code comment. | `Usage`/`Environment` added to every header; the password note is in the header. |
+| `SH-21` (*new*) | `github_backup.sh`, `copy_to_downloads.sh` | `\|\| true` without a reason. | Reason added next to each. |
+| `GEN-30` (*new*) | `copy_to_downloads.sh` | Last statement was `[[ -n "$WIN_DEST" ]] && echo ...`; if `wslpath -w` failed, a successful copy exited `1`. | Guard clause. |
+| `SH-22` (*new*) | `copy_to_downloads.sh` | Missing option value and surplus argument printed no usage. | Usage to stderr, exit `1`. |
+| `PS-14` (*new*) | `archive_directory.ps1`, `windows_maintenance.ps1` | 14 helper functions had no purpose comment (including `Resolve-SevenZip`). | Added. |
+| `PS-21` (*new*) | `attach_yubikey.ps1` | `usbipd` invoked as a bare command. | `& $usbipd.Source ...` on the resolved path. |
+| `PS-21` (*new*) | `windows_maintenance.ps1` | `wsl --list --running` and `winget upgrade --help` did not check `$LASTEXITCODE`. | Checked. `cleanmgr` and `fstrim` deliberately use `Start-Process`; marked with `standards-exception: PS-21` and a reason. |
+| `PS-23` (*new*) | `windows_maintenance.ps1` | Four `catch` blocks only `return`ed. | Each logs with `Write-Verbose`. |
+| `PS-32` (*new*) | `windows_maintenance.ps1` | `Set-Content` for `pid.txt` had no `-Encoding`. | `-Encoding ASCII`. |
+| `GEN-30` (*new*) | `windows_maintenance.ps1` | Declining the prompt exits `1` but the help and README did not say so. | Documented. |
 
 ### SHOULD rules
 
-| Rule | File | Deviation |
+| Rule | File | Fix |
 | --- | --- | --- |
-| `SH-31` | `scripts/git/github_backup.sh` | Takes no arguments but has no `-h`/`--help` and silently ignores any arguments it is given. |
-| `PS-03` | all four `.ps1` files | No `.EXAMPLE` in the help block (examples live in the README). |
-| `PS-15` | `windows_maintenance.ps1`, `register_yubikey_attach_task.ps1` | Backtick line continuation in several calls. |
-| `PS-50` | `register_yubikey_attach_task.ps1`, `attach_yubikey.ps1`, `windows_maintenance.ps1` | Change persistent state (scheduled task, wrapper file, device binding, registry, updates) without `SupportsShouldProcess`. Only `archive_directory.ps1` supports `-WhatIf`. `windows_maintenance.ps1` may need a design decision, since each step runs in a separate process. |
-| `GEN-36` | `scripts/wsl/copy_to_downloads.sh` | `--force` does `rm -rf` on the destination with no preview mode. |
+| `SH-31` | `github_backup.sh` | `usage()`, `-h`/`--help`, and unexpected arguments rejected. |
+| `SH-31` (*new*) | `update_flakes.sh` | `usage()` is a quoted heredoc instead of `sed`-ing the header, so it matches the reference implementation. |
+| `PS-03` | all four `.ps1` files | `.EXAMPLE` added (also to `windows_maintenance.ps1`). |
+| `PS-50` | `attach_yubikey.ps1`, `register_yubikey_attach_task.ps1` | `SupportsShouldProcess`; each persistent change is gated, and `-WhatIf` changes nothing. |
+| `GEN-36` | `copy_to_downloads.sh` | `-n`/`--dry-run` added; `--force` replacement can be previewed. |
+| `GEN-14` (*new*) | `github_backup.sh` | Commented-out array entry in `IGNORE_LIST` replaced by an example in prose. |
+
+`GEN-10`, `GEN-11`, `GEN-16`, `SH-01`, `SH-04`, `SH-05`, `SH-13`,
+`SH-14`, `SH-24`, `SH-25`, `SH-50`, `PS-01`, `PS-04`, `PS-05`, `PS-30`, `PS-40`
+and `PS-60` were checked by tool or by hand over every script and hold: the Bash
+scripts use the `env` shebang, `set -euo pipefail`, `[[ ]]` and `$(...)` only, are
+`100755` and shellcheck-clean; every script is ASCII, LF, ends in a newline and
+has no tabs or trailing whitespace; the PowerShell scripts are PSScriptAnalyzer
+clean, parse under a `PSUseCompatibleSyntax` (5.1) check, set strict mode and
+`Stop`, avoid `Write-Host` and use `-LiteralPath`.
+
+## Open items
+
+| Rule | File | Status |
+| --- | --- | --- |
+| `PS-50`, `GEN-33`, `GEN-36` | `windows_maintenance.ps1` | **Needs a design decision.** No `-WhatIf`, and Disk Cleanup empties the Recycle Bin. The up-front plan plus the `[y/N]` prompt (or `-Yes`) is the only gate. Each step runs in its own process, so `-WhatIf` would have to be honoured by the orchestrator (list the steps and skip launching them) and by the elevated relaunch. Decide whether `-Yes` counts as the explicit opt-in `GEN-33` asks for, or add `-WhatIf`. |
+| `PS-15` | `windows_maintenance.ps1`, `register_yubikey_attach_task.ps1` | Backtick continuation remains in several calls; tolerated for existing code. |
+| `GEN-13` | `windows_maintenance.ps1` | About 110 lines exceed 100 columns, mostly long string literals and `param`/`Write-Warning` lines, which the rule allows. Not audited line by line. |
+
+### Ambiguities in the rules, not changed
+
+- **`PS-14` positional parameters.** Read literally, "no positional parameters
+  beyond the obvious first one" forbids `Join-Path $a 'b'`, which every script,
+  including the reference implementations, uses. PSScriptAnalyzer's
+  `PSAvoidUsingPositionalParameters` accepts it and the earlier review counted
+  `PS-14` as holding, so it was left alone. Consider saying so in the rule.
+- **`PS-11` inline `if`.** `$x = if (...) { 'a' } else { 'b' }` keeps `else` on
+  the same line as the closing brace. It is used widely in
+  `windows_maintenance.ps1` and was left alone; the rule text only describes
+  statement-form `if`.
+- **`SH-16` and `echo`.** Messages such as `echo "Error: ... $path"` interpolate
+  a variable after literal text. Treated as allowed ("`echo` is fine for literal
+  messages"), matching `SH-22`.
+- **`GEN-23` and `github_backup.sh`.** `jq` is listed as a requirement (header,
+  README, `flake.nix` agree) and checked up front, but the script only uses
+  `gh --jq`, which is built into `gh`. Not a violation; the dependency could be
+  dropped.
 
 ### Not deviations, but worth deciding
 
 - **CLAUDE.md duplicates part of these rules.** Its "Bash standards" and
-  "PowerShell standards" sections predate this directory. They agree with the
-  documents today, but two copies will drift. Suggested: replace them with a short
-  summary that links to `docs/standards/`, keeping CLAUDE.md to layout and workflow.
-  Not done, because the request was to add documents only.
-- **README index.** `README.md` does not mention `docs/standards/`. A one-line link
-  near the top would make the standards discoverable.
+  "PowerShell standards" sections predate this directory and agree with the
+  documents today, but two copies will drift. CLAUDE.md now links here and says
+  to change the rules here first; replacing the summaries entirely with a link is
+  still an option.
 - **`GEN-80` history.** Some past commits are unscoped (`feat: improve scripts`).
   History is not being rewritten; the rule applies going forward.
