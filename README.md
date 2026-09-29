@@ -187,6 +187,37 @@ the script is optional (see step 2 above). PSScriptAnalyzer note:
 Windows-only and not resolvable on the Linux CI linter, which is fine — the
 default ruleset does not check command existence.
 
+## scripts/nix/update_flakes.sh
+
+Recursively searches `~/repos` for every `flake.nix`, runs `nix flake update`
+next to each, and commits the resulting `flake.lock` change as
+`chore(flake): sync YYYY-MM-DD` (today's local date). **Never pushes.** The search
+descends through plain folders, so `~/repos/homelab/foo` is found even though
+`homelab` is neither a repo nor a flake. `.git`, `node_modules` and `.direnv` are
+not searched.
+
+```bash
+update_flakes.sh                                  # update everything under ~/repos
+update_flakes.sh homelab ~/repos/foo ../bar       # ...but leave those out
+```
+
+- `[IGNORE...]` (positional, any number) — directories to exclude, along with
+  everything beneath them. Each may be an absolute path (a quoted `~/...` is
+  expanded), a path relative to the current directory or to the search root
+  (`homelab/lab`), or a bare name, which matches any directory with that name
+  under the search root.
+- `REPOS_DIR` — env var; directory to search instead of `~/repos`.
+- `-h, --help` — print the header comment.
+
+Safety behaviour: each repo gets one commit containing only its `flake.lock`
+file(s) — other staged/unstaged changes are left alone and no commit is made if
+the lock didn't change. A flake is skipped (listed in the summary) if it isn't in
+a git repo, is in a linked worktree (only the main checkout is updated), has a
+gitignored `flake.lock`, or already has uncommitted `flake.lock` changes. Failures
+in one flake/repo don't stop the rest; the script exits non-zero if any failed.
+
+Requires: `nix` (flakes enabled), `git`, `find`, `realpath`.
+
 ## scripts/wsl/copy_to_downloads.sh
 
 Run from inside WSL: copies a file or directory to the Windows user's Downloads
