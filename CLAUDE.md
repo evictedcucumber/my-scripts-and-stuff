@@ -13,6 +13,8 @@ scripts/
     github_backup.sh     # backs up all repos for a GitHub owner into a 7z archive
   maintenance/
     windows_maintenance.ps1   # Windows Update + winget + DISM/SFC + Disk Cleanup + WSL disk compaction + health check + defrag + Defender (+ opt-in driver updates); confirms first, each step in its own window, self-elevates via UAC
+  nix/
+    update_flakes.sh     # nix flake update + "chore(flake): sync YYYY-MM-DD" commit for every flake under ~/repos (no push)
   wsl/
     attach_yubikey.ps1                 # attaches a YubiKey to WSL via usbipd-win
     copy_to_downloads.sh               # copies a WSL file/dir to the Windows user's Downloads folder
