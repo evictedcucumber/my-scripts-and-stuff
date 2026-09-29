@@ -336,14 +336,18 @@ preserved, mode/ownership are not (they don't map onto the Windows filesystem).
 ```bash
 copy_to_downloads.sh ~/reports/2026-09        # -> C:\Users\me\Downloads\2026-09
 copy_to_downloads.sh --force ./build/app.zip
+copy_to_downloads.sh --dry-run --force ./build/app.zip   # preview, change nothing
 ```
 
 - `<wsl-path>` (positional, required) — the file or directory to copy.
 - `-d, --dest DIR` — destination directory instead of Downloads; accepts a WSL
   path or a Windows path (`C:\...`). Also settable via `WIN_DOWNLOADS_DIR`.
 - `-f, --force` — replace an existing item of the same name (otherwise the copy
-  is refused).
+  is refused). The existing item is deleted with `rm -rf` before the copy.
+- `-n, --dry-run` — run every check and print what would be copied (and
+  replaced), but change nothing.
 - `-v, --verbose` — pass `-v` to `cp`.
+- `WIN_DOWNLOADS_DIR` — env var; same as `--dest`, which wins if both are given.
 
 Requires: WSL (`wslpath`), coreutils; `powershell.exe` / `cmd.exe` for Downloads
 autodetection (not needed when `--dest` / `WIN_DOWNLOADS_DIR` is given).

@@ -17,9 +17,15 @@
 #   -d, --dest DIR   Destination directory (WSL or Windows path); overrides
 #                    autodetection. Also settable via WIN_DOWNLOADS_DIR.
 #   -f, --force      Replace an existing item of the same name at the
-#                    destination (otherwise the copy is refused).
+#                    destination (otherwise the copy is refused). The existing
+#                    item is deleted with rm -rf before the copy.
+#   -n, --dry-run    Validate and show what would be copied (and replaced), but
+#                    change nothing.
 #   -v, --verbose    Pass -v to cp.
 #   -h, --help       Show this help.
+#
+# Environment:
+#   WIN_DOWNLOADS_DIR   Destination directory; same as --dest, which wins.
 #
 # Requirements: WSL (wslpath), coreutils. powershell.exe / cmd.exe are used for
 # Downloads-folder autodetection when present.
@@ -32,6 +38,7 @@ set -euo pipefail
 
 DEST_OVERRIDE="${WIN_DOWNLOADS_DIR:-}"
 FORCE=false
+DRY_RUN=false
 CP_OPTS=(-R --preserve=timestamps)
 SRC=""
 
@@ -44,21 +51,30 @@ Copy a WSL file or directory into the Windows user's Downloads folder.
 Options:
   -d, --dest DIR   Destination directory (WSL or Windows path); overrides
                    autodetection. Also settable via WIN_DOWNLOADS_DIR.
-  -f, --force      Replace an existing item of the same name at the destination.
+  -f, --force      Replace an existing item of the same name at the destination
+                   (deleted with rm -rf first).
+  -n, --dry-run    Validate and show what would be copied, but change nothing.
   -v, --verbose    Pass -v to cp.
   -h, --help       Show this help.
+
+Environment:
+  WIN_DOWNLOADS_DIR   Destination directory; same as --dest, which wins.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -d | --dest)
-      [[ $# -ge 2 ]] || { echo "Error: $1 requires an argument." >&2; exit 1; }
+      [[ $# -ge 2 ]] || { echo "Error: $1 requires an argument." >&2; usage >&2; exit 1; }
       DEST_OVERRIDE="$2"
       shift 2
       ;;
     -f | --force)
       FORCE=true
+      shift
+      ;;
+    -n | --dry-run)
+      DRY_RUN=true
       shift
       ;;
     -v | --verbose)
@@ -91,6 +107,7 @@ fi
 
 if [[ $# -gt 0 ]]; then
   echo "Error: too many arguments (expected a single source path)." >&2
+  usage >&2
   exit 1
 fi
 
@@ -155,23 +172,32 @@ query_windows_downloads() {
         if (-not $p) { $p = Join-Path $env:USERPROFILE "Downloads" }
         [Environment]::ExpandEnvironmentVariables($p)
       ' 2>/dev/null | tr -d '\r' | head -n1
-    )" || win_dir=""
+    )" || win_dir="" # powershell.exe unusable: fall through to the cmd.exe lookup
   fi
 
   if [[ -z "$win_dir" ]] && command -v cmd.exe >/dev/null 2>&1; then
     local profile
+    # cmd.exe unusable: leave win_dir empty, the caller has a final fallback.
     profile="$(cd /mnt/c && cmd.exe /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r' | head -n1)" || profile=""
-    [[ -n "$profile" && "$profile" != '%USERPROFILE%' ]] && win_dir="${profile}\\Downloads"
+    if [[ -n "$profile" && "$profile" != '%USERPROFILE%' ]]; then
+      win_dir="${profile}\\Downloads"
+    fi
   fi
 
-  [[ -n "$win_dir" ]] && wslpath -u -- "$win_dir"
+  if [[ -z "$win_dir" ]]; then
+    return 1
+  fi
+  wslpath -u -- "$win_dir"
 }
 
 if [[ -n "$DEST_OVERRIDE" ]]; then
   DOWNLOADS_DIR="$(to_wsl_path "$DEST_OVERRIDE")"
 else
+  # Autodetection failing is not fatal: fall back to the conventional path.
   DOWNLOADS_DIR="$(query_windows_downloads || true)"
-  [[ -n "$DOWNLOADS_DIR" ]] || DOWNLOADS_DIR="/mnt/c/Users/${USER:-$(id -un)}/Downloads"
+  if [[ -z "$DOWNLOADS_DIR" ]]; then
+    DOWNLOADS_DIR="/mnt/c/Users/${USER:-$(id -un)}/Downloads"
+  fi
 fi
 
 if [[ -z "$DOWNLOADS_DIR" ]]; then
@@ -197,12 +223,23 @@ if [[ "$SRC_ABS" == "$DEST_PATH" ]]; then
   exit 1
 fi
 
-if [[ -e "$DEST_PATH" ]]; then
-  if [[ "$FORCE" != true ]]; then
-    echo "Error: destination already exists: $DEST_PATH" >&2
-    echo "       Re-run with --force to replace it." >&2
-    exit 1
+if [[ -e "$DEST_PATH" && "$FORCE" != true ]]; then
+  echo "Error: destination already exists: $DEST_PATH" >&2
+  echo "       Re-run with --force to replace it." >&2
+  exit 1
+fi
+
+if [[ "$DRY_RUN" == true ]]; then
+  if [[ -e "$DEST_PATH" ]]; then
+    echo "Would replace existing: $DEST_PATH"
   fi
+  echo "Would copy: $SRC_ABS"
+  echo "        ->  $DEST_PATH"
+  echo "Dry run - nothing was changed."
+  exit 0
+fi
+
+if [[ -e "$DEST_PATH" ]]; then
   echo "Replacing existing: $DEST_PATH"
   rm -rf -- "$DEST_PATH"
 fi
@@ -215,8 +252,12 @@ if ! cp "${CP_OPTS[@]}" -- "$SRC_ABS" "$DEST_PATH"; then
   exit 1
 fi
 
+# The copy already succeeded; the size and the Windows-style path are only
+# cosmetic, so a failure to compute either must not fail the run.
 SIZE="$(du -sh -- "$DEST_PATH" 2>/dev/null | cut -f1 || true)"
 WIN_DEST="$(wslpath -w -- "$DEST_PATH" 2>/dev/null || true)"
 
 echo "Done.${SIZE:+ ($SIZE)}"
-[[ -n "$WIN_DEST" ]] && echo "Windows path: $WIN_DEST"
+if [[ -n "$WIN_DEST" ]]; then
+  echo "Windows path: $WIN_DEST"
+fi
