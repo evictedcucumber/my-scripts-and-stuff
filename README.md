@@ -99,8 +99,8 @@ do, with the destructive parts (Disk Cleanup empties the Recycle Bin; component
 store cleanup drops superseded component versions) and the disruptive parts
 (`wsl --shutdown` ends every running WSL session and anything that depends on it,
 including a WSL shell you may have started the script from; winget may close
-running apps) called out, and asks `Proceed? [y/N]`. Declining exits without
-changing anything. `-Yes` skips the question (the plan is still printed) and is
+running apps) called out, and asks `Proceed? [y/N]`. Declining exits with code 1
+without changing anything. `-Yes` skips the question (the plan is still printed) and is
 required for unattended runs — a non-interactive session without it declines.
 After you confirm, it warns about an already-pending reboot and nearly-full
 volumes, and creates a System Restore point (`-SkipRestorePoint` to skip;

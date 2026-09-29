@@ -31,12 +31,12 @@
     and the disruptive ones
     (wsl --shutdown ends every running WSL session and anything that depends on
     it; winget may close running apps) - and asks for confirmation. Declining
-    exits without changing anything. -Yes skips the question (needed for
-    unattended runs; the plan is still printed). After confirmation it runs
-    preflight checks (warns about an already-pending reboot and nearly-full
-    volumes) and creates a System Restore point before making changes
-    (-SkipRestorePoint to skip; Windows may decline if System Protection is off
-    or a point was already created in the last 24 hours).
+    exits with code 1 without changing anything. -Yes skips the question
+    (needed for unattended runs; the plan is still printed). After confirmation
+    it runs preflight checks (warns about an already-pending reboot and
+    nearly-full volumes) and creates a System Restore point before making
+    changes (-SkipRestorePoint to skip; Windows may decline if System
+    Protection is off or a point was already created in the last 24 hours).
 
     The script does not require elevation to start. If it is launched without
     Administrator and any step that needs it (Windows Update, winget system
@@ -246,6 +246,22 @@
     Internal. The temp run directory a -RunStep child reads/writes (result JSON
     and output.log). Set by the orchestrator.
 
+.EXAMPLE
+    .\windows_maintenance.ps1
+
+    Prints the plan, asks to confirm, then runs every step (prompting for UAC
+    elevation if not already an administrator).
+
+.EXAMPLE
+    .\windows_maintenance.ps1 -Yes -SkipWslCompact -SkipDefrag
+
+    Unattended pass that leaves WSL alone and skips the volume optimization.
+
+.EXAMPLE
+    .\windows_maintenance.ps1 -NoElevate -Yes -SkipWindowsUpdate -SkipIntegrity -SkipDiskCleanup -SkipWslCompact -SkipHealthCheck -SkipDefrag -SkipDefender
+
+    No elevation and no question: only the user-scope winget pass runs.
+
 .NOTES
     Requirements: Windows 10 / 11 (or matching Server), PowerShell 5.1+. No
     #Requires -RunAsAdministrator: the script self-elevates when a step needs
@@ -371,6 +387,7 @@ if ([string]::IsNullOrEmpty($script:HostExe)) {
 }
 
 function Test-Administrator {
+    # True when this process is elevated (has a full Administrator token).
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -553,7 +570,7 @@ function Invoke-MaintenanceStep {
 
     $stepDir = Join-Path $RunDir $Step
     New-Item -ItemType Directory -Path $stepDir -Force | Out-Null
-    Set-Content -LiteralPath (Join-Path $stepDir 'pid.txt') -Value $PID
+    Set-Content -LiteralPath (Join-Path $stepDir 'pid.txt') -Value $PID -Encoding ASCII
 
     try {
         $Host.UI.RawUI.WindowTitle = "maintenance: $title"
@@ -656,6 +673,8 @@ function Invoke-MaintenanceStep {
 }
 
 function Test-PendingReboot {
+    # True when Windows has a reboot pending. Asks PSWindowsUpdate first, then
+    # falls back to the well-known registry markers if it is not loaded.
     try {
         return [bool](Get-WURebootStatus -Silent -ErrorAction Stop)
     }
@@ -695,6 +714,7 @@ function Get-PropertyValue {
 }
 
 function Format-ByteSize {
+    # Human-readable size ("1.5 GB", "-320 MB"); keeps the sign.
     param(
         [Parameter(Mandatory)] [double] $Bytes
     )
@@ -836,6 +856,7 @@ function Test-FileLocked {
         return $false
     }
     catch {
+        Write-Verbose "Could not open exclusively (${Path}): $($_.Exception.Message)"
         return $true
     }
     finally {
@@ -945,6 +966,8 @@ function Get-MaintenancePlan {
 }
 
 function Show-MaintenancePlan {
+    # Prints the plan from Get-MaintenancePlan, grouped by how much each part
+    # can hurt, before the confirmation prompt.
     param(
         [Parameter(Mandatory)] $Plan
     )
@@ -1050,6 +1073,8 @@ function Invoke-RestorePoint {
 # ---------------------------------------------------------------------------
 
 function Initialize-PSWindowsUpdate {
+    # Loads the PSWindowsUpdate module, installing it from the PowerShell
+    # Gallery (CurrentUser scope) on first use.
     if (Get-Module -ListAvailable -Name PSWindowsUpdate) {
         Import-Module -Name PSWindowsUpdate -Force
         return
@@ -1103,6 +1128,8 @@ function Initialize-MicrosoftUpdateService {
 }
 
 function Invoke-WindowsUpdate {
+    # Installs software updates, plus Office and other Microsoft products when
+    # the Microsoft Update service is usable. Drivers are left to -DriverUpdate.
     Initialize-PSWindowsUpdate
 
     # -Install runs scan + download + install in one call; -AcceptAll answers
@@ -1183,6 +1210,8 @@ function Invoke-DriverUpdate {
 # ---------------------------------------------------------------------------
 
 function Resolve-Winget {
+    # Full path of winget.exe, from PATH or the App Installer package folder;
+    # $null when winget is not installed.
     $command = Get-Command -Name winget.exe -CommandType Application -ErrorAction SilentlyContinue |
         Select-Object -First 1
     if ($command) {
@@ -1229,8 +1258,12 @@ function Test-WslRunning {
     $env:WSL_UTF8 = '1'
     try {
         $listed = & $wsl.Source --list --running --quiet 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            return $false
+        }
     }
     catch {
+        Write-Verbose "Could not list running WSL distributions: $($_.Exception.Message)"
         return $false
     }
     finally {
@@ -1251,17 +1284,24 @@ function Test-WslRunning {
 }
 
 function Test-WingetSupportsExclude {
+    # True when this winget build understands "upgrade --exclude" (older ones do
+    # not).
     param([Parameter(Mandatory)] [string] $Winget)
     try {
         $help = & $Winget upgrade --help 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            return $false
+        }
     }
     catch {
+        Write-Verbose "Could not read winget upgrade help: $($_.Exception.Message)"
         return $false
     }
     return (($help -join "`n") -match '--exclude')
 }
 
 function Test-WingetUpgradeAvailable {
+    # True when winget reports a pending upgrade for exactly this package Id.
     param(
         [Parameter(Mandatory)] [string] $Winget,
         [Parameter(Mandatory)] [string] $Id
@@ -1271,6 +1311,7 @@ function Test-WingetUpgradeAvailable {
             --disable-interactivity --accept-source-agreements 2>$null
     }
     catch {
+        Write-Verbose "Could not query winget for ${Id}: $($_.Exception.Message)"
         return $false
     }
     return ($LASTEXITCODE -eq 0 -and (($out -join "`n") -match [regex]::Escape($Id)))
@@ -1470,6 +1511,7 @@ function Get-SfcOutcome {
 }
 
 function Invoke-IntegrityRepair {
+    # DISM RestoreHealth, then sfc /scannow; unrepairable corruption fails it.
     $problems = [System.Collections.Generic.List[string]]::new()
     $warnings = [System.Collections.Generic.List[string]]::new()
     $notes = [System.Collections.Generic.List[string]]::new()
@@ -1523,6 +1565,8 @@ function Invoke-IntegrityRepair {
 # ---------------------------------------------------------------------------
 
 function Invoke-DiskCleanup {
+    # Runs Disk Cleanup (cleanmgr /sagerun) on every fixed drive with all but
+    # the unsafe handlers enabled, then trims the WinSxS store with DISM.
     param(
         [Parameter(Mandatory)] [int] $SagerunProfile
     )
@@ -1569,6 +1613,9 @@ function Invoke-DiskCleanup {
 
         # /sagerun can hand work to child processes and return early, so wait for
         # the process we start and then for any lingering cleanmgr / dismhost.
+        # standards-exception: PS-21 cleanmgr's exit code says nothing about the
+        # result (it hands work to child processes); completion is detected by
+        # waiting on those processes instead.
         Start-Process -FilePath $cleanmgr -ArgumentList "/sagerun:$SagerunProfile" -Wait
         Get-Process -Name 'cleanmgr', 'dismhost' -ErrorAction SilentlyContinue |
             Wait-Process -Timeout 1800 -ErrorAction SilentlyContinue
@@ -1627,6 +1674,8 @@ function Invoke-WslTrim {
     )
 
     Write-Output "  fstrim in $Distro ..."
+    # standards-exception: PS-21 needs a bounded wait (WaitForExit, then Kill)
+    # so a wedged distro cannot hang the step; best effort, so no exit code.
     $process = Start-Process -FilePath $Wsl -NoNewWindow -PassThru `
         -ArgumentList @('-d', (Format-ProcessArgument $Distro), '-u', 'root', '--exec', 'fstrim', '-av')
     if (-not $process.WaitForExit(120000)) {
@@ -1991,6 +2040,8 @@ function Invoke-HealthCheck {
 # ---------------------------------------------------------------------------
 
 function Invoke-VolumeOptimization {
+    # Runs Optimize-Volume (defrag or retrim, per media type) on each fixed
+    # NTFS/ReFS volume, skipping any whose disk reports it is unhealthy.
     $targets = @(
         Get-Volume |
             Where-Object {
@@ -2055,6 +2106,8 @@ function Invoke-VolumeOptimization {
 # ---------------------------------------------------------------------------
 
 function Invoke-DefenderMaintenance {
+    # Updates Defender signatures and runs a scan. An active threat fails the
+    # step; stale signatures or a detection Defender handled only warn.
     if (-not (Get-Command -Name Get-MpComputerStatus -ErrorAction SilentlyContinue)) {
         $script:StepStatus = 'SKIP'
         $script:StepDetail = 'Microsoft Defender cmdlets not available'
