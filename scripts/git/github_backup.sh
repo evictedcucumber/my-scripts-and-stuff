@@ -8,9 +8,78 @@
 # fetched and local branches are created for every remote branch so the backup
 # is self-contained.
 #
-# Requirements: gh, git, 7z, jq
+# Exits 1 if any repo failed to clone or prepare. The archive is still created
+# from the repos that succeeded, so a partial backup is kept but flagged.
+#
+# Usage:
+#   github_backup.sh [-h|--help]
+#
+# Environment:
+#   OWNER               GitHub user/org to back up (default: evictedcucumber).
+#   OUTPUT_DIR          Where the archive is written (default: current
+#                       directory). Created if missing.
+#   GH_BACKUP_IGNORE    Extra "owner/name" repos to skip, space- or
+#                       newline-separated, appended to IGNORE_LIST below.
+#   GH_BACKUP_PASSWORD  If set, encrypts the archive (7z -mhe=on). 7z takes the
+#                       password as a -p... command-line argument, so it is
+#                       visible to other local users via `ps` while 7z runs;
+#                       only use this on a trusted host.
+#
+# Requirements: gh (authenticated), git, 7z, jq
 #
 set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Arguments
+# ---------------------------------------------------------------------------
+
+usage() {
+  cat <<'EOF'
+Usage: github_backup.sh [-h|--help]
+
+Back up every GitHub repo owned by OWNER into a single 7z archive.
+Configured through environment variables, not arguments.
+
+Environment:
+  OWNER               GitHub user/org to back up (default: evictedcucumber).
+  OUTPUT_DIR          Where the archive is written (default: current directory).
+  GH_BACKUP_IGNORE    Extra "owner/name" repos to skip (space/newline separated).
+  GH_BACKUP_PASSWORD  Encrypt the archive with this password. Visible in the
+                      process list while 7z runs; use on a trusted host only.
+
+Exits 1 if any repo failed; the archive is still created from the rest.
+
+Options:
+  -h, --help          Show this help.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "Error: unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [[ $# -gt 0 ]]; then
+  echo "Error: unexpected argument: $1 (this script takes no arguments)." >&2
+  usage >&2
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Config
@@ -19,11 +88,10 @@ set -euo pipefail
 # GitHub user/org whose repos to back up. Override with OWNER=... in the env.
 OWNER="${OWNER:-evictedcucumber}"
 
-# Repos to skip, as "owner/name". Extra entries can be passed at run time via
-# GH_BACKUP_IGNORE (space- or newline-separated), which is appended to this list.
-IGNORE_LIST=(
-  # "evictedcucumber/some-repo"
-)
+# Repos to skip, as "owner/name" (e.g. evictedcucumber/some-repo). Extra entries
+# can be passed at run time via GH_BACKUP_IGNORE (space- or newline-separated),
+# which is appended to this list.
+IGNORE_LIST=()
 
 if [[ -n "${GH_BACKUP_IGNORE:-}" ]]; then
   # -d '' so the read spans newlines too; it returns non-zero at EOF (no NUL).
@@ -58,8 +126,8 @@ fi
 
 # Normalise the output dir to an absolute path and confirm it is writable
 # *before* doing the expensive clone loop.
-mkdir -p "$OUTPUT_DIR"
-OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
+mkdir -p -- "$OUTPUT_DIR"
+OUTPUT_DIR="$(cd -- "$OUTPUT_DIR" && pwd)"
 if [[ ! -w "$OUTPUT_DIR" ]]; then
   echo "Error: output directory is not writable: $OUTPUT_DIR" >&2
   exit 1
@@ -142,7 +210,7 @@ echo "Using temp dir: $WORKDIR"
 
 cleanup() {
   echo "Cleaning up temp dir: $WORKDIR"
-  rm -rf "$WORKDIR"
+  rm -rf -- "${WORKDIR:?}"
 }
 
 trap cleanup EXIT
@@ -160,12 +228,14 @@ FAILED=()
 
 prepare_repo() {
   (
-    cd "$1" || exit 1
+    cd -- "$1" || exit 1
 
     echo "Fetching all tags..."
     git fetch origin --tags --force || exit 1
 
-    # No-op (exit 0) when the repo has no .gitmodules.
+    # Best effort: a submodule that cannot be fetched (removed remote, no
+    # access) must not fail the parent repo, which is still fully backed up.
+    # A no-op (exit 0) when the repo has no .gitmodules.
     git submodule update --init --recursive || true
 
     echo "Creating local branches..."
@@ -180,6 +250,8 @@ prepare_repo() {
       [[ "$remote_branch" == "origin/HEAD" ]] && continue
       branch="${remote_branch#origin/}"
       git show-ref --verify --quiet "refs/heads/$branch" && continue
+      # Best effort: an unusable ref name only costs that one local branch,
+      # and the remote-tracking ref is still in the archive.
       git branch --track "$branch" "$remote_branch" >/dev/null 2>&1 || true
     done
 
@@ -199,14 +271,14 @@ for repo in "${REPOS[@]}"; do
   echo "==== $repo ===="
 
   if ! gh repo clone "$repo" "$dest"; then
-    echo "WARNING: failed to clone $repo"
+    echo "WARNING: failed to clone $repo" >&2
     FAILED+=("$repo")
-    rm -rf "$dest"
+    rm -rf -- "$dest"
     continue
   fi
 
   if ! prepare_repo "$dest"; then
-    echo "WARNING: failed to prepare $repo"
+    echo "WARNING: failed to prepare $repo" >&2
     FAILED+=("$repo")
   fi
 done
@@ -216,9 +288,9 @@ done
 # ---------------------------------------------------------------------------
 
 if [[ ${#FAILED[@]} -gt 0 ]]; then
-  echo
-  echo "The following repos failed:"
-  printf '  %s\n' "${FAILED[@]}"
+  echo >&2
+  echo "The following repos failed:" >&2
+  printf '  %s\n' "${FAILED[@]}" >&2
 fi
 
 if [[ ${#FAILED[@]} -eq ${#REPOS[@]} ]]; then
@@ -242,7 +314,7 @@ if [[ -n "$ARCHIVE_PASSWORD" ]]; then
   VERIFY_ARGS+=("-p${ARCHIVE_PASSWORD}")
 fi
 
-if ! (cd "$WORKDIR" && 7z "${CREATE_ARGS[@]}" "$ARCHIVE_PATH" .); then
+if ! (cd -- "$WORKDIR" && 7z "${CREATE_ARGS[@]}" "$ARCHIVE_PATH" .); then
   echo "Error: failed to create archive: $ARCHIVE_PATH" >&2
   exit 1
 fi
@@ -254,10 +326,15 @@ if ! 7z "${VERIFY_ARGS[@]}" "$ARCHIVE_PATH" >/dev/null; then
 fi
 
 # Backups of private repos should not be world-readable at rest.
-chmod 600 "$ARCHIVE_PATH"
+chmod 600 -- "$ARCHIVE_PATH"
 
 echo
 echo "Done."
 echo "Archive: $ARCHIVE_PATH"
 echo "Backed up $(( ${#REPOS[@]} - ${#FAILED[@]} )) of ${#REPOS[@]} repo(s)"
 echo "Failed: ${#FAILED[@]}"
+
+if [[ ${#FAILED[@]} -gt 0 ]]; then
+  echo "WARNING: the archive is incomplete; see the failed repos above." >&2
+  exit 1
+fi

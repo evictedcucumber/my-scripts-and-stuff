@@ -44,7 +44,18 @@ force-fetches all tags, checks out submodules, and creates local tracking
 branches for every remote branch, so the resulting archive is a self-contained,
 browsable set of working trees — not a bare mirror. After creation the archive
 is verified (`7z t`) and `chmod 600`ed; the run aborts up front if the target
-archive already exists, and errors out if *every* repo fails.
+archive already exists, and errors out if *every* repo fails. If only *some*
+repos fail, the archive is still created from the rest, the failures are listed
+on stderr, and the script **exits 1** so an incomplete backup is never mistaken
+for a good one.
+
+```bash
+./scripts/git/github_backup.sh                                   # back up OWNER's repos into $PWD
+OWNER=someone OUTPUT_DIR=~/backups ./scripts/git/github_backup.sh
+```
+
+Takes no arguments; `-h, --help` prints the usage and any other argument is
+rejected.
 
 Requires: `gh` (authenticated — `gh auth status`), `git`, `7z`, `jq`.
 
