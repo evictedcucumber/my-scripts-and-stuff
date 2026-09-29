@@ -2,7 +2,8 @@
 
 A repository with all my scripts. See [CLAUDE.md](CLAUDE.md) for repo layout and
 conventions for writing/maintaining scripts. This file documents what each script
-does, how to configure it, and its requirements.
+does, how to configure it, and its requirements. The rules every script must
+follow are in [docs/standards/](docs/standards/README.md).
 
 ## scripts/archive/archive_directory.ps1
 
