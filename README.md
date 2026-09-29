@@ -312,7 +312,8 @@ update_flakes.sh homelab ~/repos/foo ../bar       # ...but leave those out
   (`homelab/lab`), or a bare name, which matches any directory with that name
   under the search root.
 - `REPOS_DIR` — env var; directory to search instead of `~/repos`.
-- `-h, --help` — print the header comment.
+- `-h, --help` — print the usage. Any other option starting with `-` is an
+  error; use `--` before an `IGNORE` that itself starts with `-`.
 
 Safety behaviour: each repo gets one commit containing only its `flake.lock`
 file(s) — other staged/unstaged changes are left alone and no commit is made if
