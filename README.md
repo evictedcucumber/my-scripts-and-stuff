@@ -359,10 +359,13 @@ Windows-side helper (not run from WSL/bash) that finds a connected YubiKey via
 `usbipd attach --wsl --busid <id>`. Skips the attach if the device is already
 `Attached`; if the device has never been shared it runs `usbipd bind --busid
 <id>` first (one-time, persistent). No-ops with a message if no matching device
-is found, and exits non-zero if `usbipd list` itself fails.
+is found, and exits non-zero if `usbipd list` itself fails. Supports `-WhatIf` /
+`-Confirm`: the bind and the attach are the only changes it makes, and neither
+runs under `-WhatIf`.
 
-Requires: [usbipd-win](https://github.com/dorssel/usbipd-win), run from an elevated
-PowerShell prompt (`usbipd bind`/`attach` need Administrator).
+Requires: Windows PowerShell 5.1+, [usbipd-win](https://github.com/dorssel/usbipd-win),
+run from an elevated PowerShell prompt (`usbipd bind`/`attach` need
+Administrator).
 
 Run manually whenever the YubiKey needs to (re)appear inside WSL, e.g. after a
 replug or reboot — not scheduled or hooked into anything automatically. To
@@ -374,7 +377,10 @@ Windows-side, run once (and re-run any time to update): idempotently registers a
 Scheduled Task (`AttachYubiKeyToWSL`) that runs `attach_yubikey.ps1` whenever any
 USB device is connected, so plugging in the YubiKey auto-attaches it to WSL with
 no manual step. Run with `-Remove` to unregister the task and delete the
-generated VBScript wrapper (`attach_yubikey.ps1` is left in place).
+generated VBScript wrapper (`attach_yubikey.ps1` is left in place). Supports
+`-WhatIf` / `-Confirm`: enabling the event log, writing the wrapper, registering
+the task and the `-Remove` teardown each report what they would do and change
+nothing under `-WhatIf`.
 
 - Expects `attach_yubikey.ps1` to already be deployed at
   `%USERPROFILE%\Documents\Scripts\attach_yubikey.ps1` — copy it there before
@@ -406,7 +412,7 @@ generated VBScript wrapper (`attach_yubikey.ps1` is left in place).
   same name, so re-running after editing either script (or moving the repo) just
   updates the registered task in place.
 
-Requires: Windows Task Scheduler (`ScheduledTasks` module, built in), run from an
-elevated PowerShell prompt. Expects `attach_yubikey.ps1` to already be deployed
+Requires: Windows PowerShell 5.1+, Windows Task Scheduler (`ScheduledTasks`
+module, built in), run from an elevated PowerShell prompt. Expects `attach_yubikey.ps1` to already be deployed
 at `%USERPROFILE%\Documents\Scripts\attach_yubikey.ps1` — copy it there before
 running this script.
