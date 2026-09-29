@@ -37,6 +37,17 @@
     Replace an existing archive of the same name instead of adding a numeric
     suffix.
 
+.EXAMPLE
+    .\archive_directory.ps1 C:\projects\foo
+
+    Archives the contents of C:\projects\foo into
+    %USERPROFILE%\Downloads\<YYYY-MM-DD>.7z.
+
+.EXAMPLE
+    .\archive_directory.ps1 C:\projects\foo -DestinationDirectory D:\backups -WhatIf
+
+    Shows which archive would be created in D:\backups without creating it.
+
 .NOTES
     Requirements: Windows, PowerShell 5.1+, 7-Zip (https://www.7-zip.org)
     installed and on PATH or under %ProgramFiles%\7-Zip.
@@ -89,6 +100,8 @@ function Get-DownloadsFolder {
 }
 
 function Resolve-SevenZip {
+    # Finds 7-Zip: PATH first (7z, 7za), then the standard install folders under
+    # Program Files. Returns the full path, or $null when it is not installed.
     foreach ($name in '7z', '7za') {
         $cmd = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue |
             Select-Object -First 1
