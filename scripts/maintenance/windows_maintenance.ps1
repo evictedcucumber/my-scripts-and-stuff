@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
     Runs a batch of Windows maintenance tasks in one pass: Windows Update,
-    winget upgrades, Disk Cleanup on C:, per-volume optimization
+    winget upgrades (user + system passes), Disk Cleanup on C:, per-volume optimization
     (defrag / retrim), and - with -DriverUpdate - Windows Update driver updates.
 
 .DESCRIPTION
@@ -21,14 +21,13 @@
     open.
 
     The script does not require elevation to start. If it is launched without
-    Administrator and any step that needs it (Windows Update, Disk Cleanup,
-    defrag) is going to run, the script relaunches itself elevated in a new
+    Administrator and any step that needs it (Windows Update, winget system
+    pass, Disk Cleanup, defrag) is going to run, the script relaunches itself elevated in a new
     console (one UAC prompt), runs there, and exits with that run's exit code;
     the elevated window stays open at the end so its output is readable. Pass
     -NoElevate to suppress the relaunch - the admin-only steps are then marked
-    SKIP (not FAIL) and the run exits non-zero. The winget step needs no
-    elevation of its own (without it, winget upgrades user-scope packages
-    only).
+    SKIP (not FAIL) and the run exits non-zero. The winget user pass
+    never runs elevated.
 
       1. Windows Update
          Scans, downloads, and installs all applicable updates via the
@@ -38,13 +37,18 @@
          Automatic reboots are suppressed (-IgnoreReboot); a resulting pending
          reboot is reported in the summary but not acted on.
 
-      2. winget upgrade --all --include-unknown
+      2. winget upgrade --all --include-unknown  (two passes)
+         A user pass runs first in its own de-elevated window (--scope user);
+         if this script is already elevated (e.g. "sudo pwsh -File ...") that
+         window is launched with a basic-user token via "runas /trustlevel".
+         A system pass then runs elevated with no scope filter, covering
+         machine-scope packages and anything the user pass missed. The system
+         pass is an admin-only step, so it follows the same self-elevation
+         (UAC) / -NoElevate rules as the others. Both use the settings below.
          Run non-interactively with --accept-source-agreements,
          --accept-package-agreements and --disable-interactivity. winget's
          "no applicable upgrades" result (0x8A15002B) is treated as success.
-         When elevated, any other non-zero exit fails the step; when not
-         elevated it is downgraded to a warning, since winget cannot upgrade
-         machine-scope packages without Administrator.
+         Any other non-zero exit fails that pass.
 
          Packages listed in winget_ignore.txt, next to this script (see
          winget_ignore.sample.txt), are passed as --exclude and skipped by
@@ -136,7 +140,8 @@
         registers the NuGet provider and may prompt once to trust PSGallery on
         a locked-down host).
       - winget: App Installer / winget (in-box on Windows 11 and current
-        Windows 10). Machine-scope upgrades need Administrator. The WSL
+        Windows 10). The system pass needs Administrator; the user pass is
+        de-elevated (runas.exe /trustlevel when the script is elevated). The WSL
         hold-back also calls wsl.exe (with WSL_UTF8=1) to see if a distro is
         running. Optional winget_ignore.txt next to the script (see
         winget_ignore.sample.txt) excludes listed package Ids from the
@@ -170,7 +175,7 @@ param(
 
     # Internal - set by the script when it relaunches itself.
     [switch]$Relaunched,
-    [ValidateSet('WindowsUpdate', 'DriverUpdate', 'Winget', 'DiskCleanup', 'Defrag')]
+    [ValidateSet('WindowsUpdate', 'DriverUpdate', 'Winget', 'WingetSystem', 'DiskCleanup', 'Defrag')]
     [string]$RunStep,
     [string]$RunDir
 )
@@ -202,7 +207,7 @@ $script:SkippedForAdmin = $false
 $script:IsAdmin = $false
 $script:StepDetail = ''
 $script:StepStatus = 'OK'
-$script:StepCount = if ($DriverUpdate) { 5 } else { 4 }
+$script:StepCount = if ($DriverUpdate) { 6 } else { 5 }
 $script:HostExe = (Get-Process -Id $PID).Path
 if ([string]::IsNullOrEmpty($script:HostExe)) {
     $script:HostExe = 'powershell.exe'
@@ -228,14 +233,59 @@ function Format-ProcessArgument {
     return $Value
 }
 
+function Invoke-UnelevatedStepWindow {
+    # Launch a step in a new console with a de-elevated (basic user) token while
+    # this process is elevated (e.g. run via sudo). "runas /trustlevel" returns as
+    # soon as it has spawned the process, so wait via the step's pid.txt and
+    # result.json instead of the process handle.
+    param(
+        [Parameter(Mandatory)] [string[]] $ChildArgs,
+        [Parameter(Mandatory)] [string] $StepDir
+    )
+
+    New-Item -ItemType Directory -Path $StepDir -Force | Out-Null
+    foreach ($name in 'pid.txt', 'result.json') {
+        Remove-Item -LiteralPath (Join-Path $StepDir $name) -Force -ErrorAction SilentlyContinue
+    }
+
+    $inner = (@((Format-ProcessArgument $script:HostExe)) + $ChildArgs) -join ' '
+    $runas = Start-Process -FilePath 'runas.exe' `
+        -ArgumentList @('/trustlevel:0x20000', ('"' + $inner.Replace('"', '\"') + '"')) `
+        -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop
+    if ($runas.ExitCode -ne 0) {
+        throw "runas /trustlevel exited $($runas.ExitCode)"
+    }
+
+    $pidFile = Join-Path $StepDir 'pid.txt'
+    $resultFile = Join-Path $StepDir 'result.json'
+    $deadline = (Get-Date).AddSeconds(60)
+    while (-not (Test-Path -LiteralPath $pidFile)) {
+        if ((Get-Date) -gt $deadline) {
+            throw 'unelevated step window did not start within 60s'
+        }
+        Start-Sleep -Milliseconds 500
+    }
+
+    $childPid = [int](Get-Content -LiteralPath $pidFile -Raw)
+    while (-not (Test-Path -LiteralPath $resultFile)) {
+        if (-not (Get-Process -Id $childPid -ErrorAction SilentlyContinue)) {
+            return
+        }
+        Start-Sleep -Seconds 1
+    }
+    # result.json is written just before the window pauses/closes; let it exit.
+    Get-Process -Id $childPid -ErrorAction SilentlyContinue | Wait-Process -ErrorAction SilentlyContinue
+}
+
 function Invoke-Step {
     # Orchestrator side: run one step in its own console window and fold the
     # result it writes to $RunDir\<Step>\result.json into $script:Results.
     param(
         [Parameter(Mandatory)] [string] $Name,
-        [Parameter(Mandatory)] [ValidateSet('WindowsUpdate', 'DriverUpdate', 'Winget', 'DiskCleanup', 'Defrag')] [string] $Step,
+        [Parameter(Mandatory)] [ValidateSet('WindowsUpdate', 'DriverUpdate', 'Winget', 'WingetSystem', 'DiskCleanup', 'Defrag')] [string] $Step,
         [switch] $Skip,
-        [switch] $RequiresAdmin
+        [switch] $RequiresAdmin,
+        [switch] $Unelevated
     )
 
     $ordinal = '[{0}/{1}] {2}' -f ($script:Results.Count + 1), $script:StepCount, $Name
@@ -275,8 +325,15 @@ function Invoke-Step {
 
     Write-Output "$ordinal - running in a separate window..."
     $start = Get-Date
+    $exitText = 'unknown'
     try {
-        $proc = Start-Process -FilePath $script:HostExe -ArgumentList $childArgs -Wait -PassThru -ErrorAction Stop
+        if ($Unelevated -and $script:IsAdmin) {
+            Invoke-UnelevatedStepWindow -ChildArgs $childArgs -StepDir $stepDir
+        }
+        else {
+            $proc = Start-Process -FilePath $script:HostExe -ArgumentList $childArgs -Wait -PassThru -ErrorAction Stop
+            $exitText = [string]$proc.ExitCode
+        }
     }
     catch {
         $detail = "could not launch step window: $($_.Exception.Message)"
@@ -297,7 +354,7 @@ function Invoke-Step {
     }
 
     if ($null -eq $result -or -not $result.PSObject.Properties['Status']) {
-        $detail = "step window exited without a result (exit code $($proc.ExitCode))"
+        $detail = "step window exited without a result (exit code $exitText)"
         Write-Warning ('{0} - FAILED  ({1:hh\:mm\:ss})  {2}' -f $ordinal, $span, $detail)
         $script:Results.Add([pscustomobject]@{ Step = $Name; Status = 'FAIL'; Detail = $detail })
         return
@@ -323,7 +380,7 @@ function Invoke-MaintenanceStep {
     # Child side: run exactly one step in this process, capture its console to a
     # transcript, write result.json for the orchestrator, and exit.
     param(
-        [Parameter(Mandatory)] [ValidateSet('WindowsUpdate', 'DriverUpdate', 'Winget', 'DiskCleanup', 'Defrag')] [string] $Step,
+        [Parameter(Mandatory)] [ValidateSet('WindowsUpdate', 'DriverUpdate', 'Winget', 'WingetSystem', 'DiskCleanup', 'Defrag')] [string] $Step,
         [Parameter(Mandatory)] [string] $RunDir,
         [Parameter(Mandatory)] [int] $SagerunProfile,
         [switch] $KeepOpen
@@ -332,13 +389,15 @@ function Invoke-MaintenanceStep {
     $title = @{
         WindowsUpdate = 'Windows Update'
         DriverUpdate  = 'Driver updates (Windows Update)'
-        Winget        = 'winget upgrade --all'
+        Winget        = 'winget upgrade --all (user)'
+        WingetSystem  = 'winget upgrade --all (system, elevated)'
         DiskCleanup   = 'Disk Cleanup (C:) + WinSxS'
         Defrag        = 'Optimize / defrag volumes'
     }[$Step]
 
     $stepDir = Join-Path $RunDir $Step
     New-Item -ItemType Directory -Path $stepDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $stepDir 'pid.txt') -Value $PID
 
     try {
         $Host.UI.RawUI.WindowTitle = "maintenance: $title"
@@ -369,7 +428,8 @@ function Invoke-MaintenanceStep {
         switch ($Step) {
             'WindowsUpdate' { Invoke-WindowsUpdate }
             'DriverUpdate' { Invoke-DriverUpdate }
-            'Winget' { Invoke-WingetUpgrade }
+            'Winget' { Invoke-WingetUpgrade -Scope User }
+            'WingetSystem' { Invoke-WingetUpgrade -Scope System }
             'DiskCleanup' { Invoke-DiskCleanup -SagerunProfile $SagerunProfile }
             'Defrag' { Invoke-VolumeOptimization }
         }
@@ -664,13 +724,23 @@ function Get-WingetIgnoreList {
 }
 
 function Invoke-WingetUpgrade {
+    # User: runs de-elevated, limited to user-scope packages. System: runs
+    # elevated, no scope filter, so it also picks up machine-scope packages and
+    # anything the user pass could not upgrade.
+    param(
+        [Parameter(Mandatory)] [ValidateSet('User', 'System')] [string] $Scope
+    )
+
     $winget = Resolve-Winget
     if (-not $winget) {
         throw 'winget (App Installer) not found. Install it from the Microsoft Store or https://aka.ms/getwinget.'
     }
 
-    if (-not $script:IsAdmin) {
-        Write-Warning 'Not elevated: winget will upgrade user-scope packages only; machine-scope packages need Administrator.'
+    if ($Scope -eq 'User' -and $script:IsAdmin) {
+        Write-Warning 'The user-scope pass is running elevated (could not de-elevate); user-scope packages may be installed as Administrator.'
+    }
+    if ($Scope -eq 'System' -and -not $script:IsAdmin) {
+        throw 'The system pass needs Administrator.'
     }
 
     $wingetArgs = @(
@@ -681,6 +751,9 @@ function Invoke-WingetUpgrade {
         '--accept-package-agreements'
         '--disable-interactivity'
     )
+    if ($Scope -eq 'User') {
+        $wingetArgs += @('--scope', 'user')
+    }
 
     $ignoreFile = Join-Path $PSScriptRoot 'winget_ignore.txt'
     $configIgnoreList = Get-WingetIgnoreList -Path $ignoreFile
@@ -740,15 +813,6 @@ function Invoke-WingetUpgrade {
     }
 
     $hex = '0x{0:X8}' -f ($code -band 0xFFFFFFFF)
-    if (-not $script:IsAdmin) {
-        # Without elevation winget still upgrades user-scope packages but errors
-        # on machine-scope ones - and there is no clean way to tell that apart
-        # from a genuine failure, so downgrade it to a warning rather than
-        # failing the step.
-        Write-Warning "winget exited $code ($hex); machine-scope upgrades need an elevated session."
-        $script:StepDetail = "user-scope only; winget exit $hex (re-run elevated for machine-scope)$wslNote"
-        return
-    }
     throw "winget exited $code ($hex)."
 }
 
@@ -864,6 +928,8 @@ $script:SelfPath = $PSCommandPath
 $script:SagerunProfile = $SagerunProfile
 $script:KeepStepWindows = [bool]$KeepStepWindows
 
+$script:IsAdmin = Test-Administrator
+
 # Child mode: this process was launched by the orchestrator to run one step.
 if ($RunStep) {
     if ([string]::IsNullOrEmpty($RunDir)) {
@@ -874,16 +940,14 @@ if ($RunStep) {
     exit 1  # Invoke-MaintenanceStep always exits; this is just a guard.
 }
 
-$script:IsAdmin = Test-Administrator
-
 # Self-elevate: if an admin-only step (Windows Update / driver updates / Disk
 # Cleanup / defrag) is going to run and we are not elevated, relaunch the whole
 # script elevated in a new console and mirror its exit code. -NoElevate opts out
 # (the steps are then skipped by the -RequiresAdmin gate in Invoke-Step). Step
 # windows spawned later inherit this elevation - no further UAC prompts.
-$adminStepDue = $DriverUpdate -or -not ($SkipWindowsUpdate -and $SkipDiskCleanup -and $SkipDefrag)
+$adminStepDue = $DriverUpdate -or -not ($SkipWindowsUpdate -and $SkipWinget -and $SkipDiskCleanup -and $SkipDefrag)
 if (-not $script:IsAdmin -and $adminStepDue -and -not $NoElevate) {
-    Write-Output 'Windows Update / driver updates / Disk Cleanup / defrag need Administrator - relaunching elevated (a UAC prompt will appear)...'
+    Write-Output 'Windows Update / winget (system) / driver updates / Disk Cleanup / defrag need Administrator - relaunching elevated (a UAC prompt will appear)...'
 
     $childArgs = @(
         '-NoProfile'
@@ -926,11 +990,12 @@ Write-Output "Windows maintenance run - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 Write-Output "Host: $env:COMPUTERNAME   User: $env:USERNAME   Elevated: $script:IsAdmin   Disk Cleanup profile: $SagerunProfile"
 Write-Output "Per-step windows and logs: $script:RunDir"
 if (-not $script:IsAdmin -and $adminStepDue) {
-    Write-Warning '-NoElevate and not elevated - Windows Update, driver updates, Disk Cleanup and defrag will be skipped.'
+    Write-Warning '-NoElevate and not elevated - Windows Update, winget (system), driver updates, Disk Cleanup and defrag will be skipped.'
 }
 
 Invoke-Step -Name 'Windows Update'             -Step WindowsUpdate -Skip:$SkipWindowsUpdate -RequiresAdmin
-Invoke-Step -Name 'winget upgrade --all'       -Step Winget        -Skip:$SkipWinget
+Invoke-Step -Name 'winget upgrade (user)'      -Step Winget        -Skip:$SkipWinget        -Unelevated
+Invoke-Step -Name 'winget upgrade (system)'    -Step WingetSystem  -Skip:$SkipWinget        -RequiresAdmin
 Invoke-Step -Name 'Disk Cleanup (C:) + WinSxS' -Step DiskCleanup   -Skip:$SkipDiskCleanup   -RequiresAdmin
 Invoke-Step -Name 'Optimize / defrag volumes'  -Step Defrag        -Skip:$SkipDefrag        -RequiresAdmin
 if ($DriverUpdate) {

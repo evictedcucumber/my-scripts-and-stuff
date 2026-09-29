@@ -92,14 +92,15 @@ directory (`%TEMP%\windows_maintenance_<timestamp>\<Step>\`) is kept afterward.
 Windows PowerShell 5.1 may not capture native-EXE output in full — the live
 window always shows everything.)
 
-It does **not** require elevation to start. Windows Update, driver updates, Disk
-Cleanup and defrag need Administrator; if any of them is going to run and the
+It does **not** require elevation to start. Windows Update, winget (system pass),
+driver updates, Disk Cleanup and defrag need Administrator; if any of them is going to run and the
 session is not elevated, the script **relaunches itself elevated in a new
 console** (one UAC prompt), runs there, mirrors that run's exit code, and leaves
 the window open at the end so the summary is readable. `-NoElevate` suppresses
 the relaunch — those steps are then marked `SKIP` (not `FAIL`) and the run exits
-non-zero. The winget step needs no elevation of its own (without it, only
-user-scope packages are upgraded). An explicit `-Skip…` always wins over both.
+non-zero. The winget user pass always runs de-elevated (if the script is already
+elevated, e.g. via `sudo pwsh -File ...`, it is launched with a basic-user token
+through `runas /trustlevel`). An explicit `-Skip…` always wins over both.
 
 ```powershell
 # full pass — prompts for elevation if not already admin
@@ -108,7 +109,7 @@ user-scope packages are upgraded). An explicit `-Skip…` always wins over both.
 # also install Windows Update driver updates (verified/WHQL only)
 .\scripts\maintenance\windows_maintenance.ps1 -DriverUpdate
 
-# no elevation, no UAC prompt: just upgrade user-scope winget packages
+# no elevation, no UAC prompt: just the user-scope winget pass (system pass is skipped)
 .\scripts\maintenance\windows_maintenance.ps1 -NoElevate -SkipWindowsUpdate -SkipDiskCleanup -SkipDefrag
 
 # skip the slow ones
@@ -122,12 +123,13 @@ user-scope packages are upgraded). An explicit `-Skip…` always wins over both.
    `CurrentUser` scope; the NuGet provider is bootstrapped first, and PSGallery
    may prompt once to trust it on a locked-down host). Automatic reboots are
    suppressed; a resulting pending reboot is reported in the summary only.
-2. **winget** — `winget upgrade --all --include-unknown` with
+2. **winget** — two passes: first a **user** pass, run de-elevated with
+   `--scope user`, then a **system** pass, run elevated with no scope filter (so
+   it picks up machine-scope packages and anything the user pass couldn't
+   upgrade). Each is `winget upgrade --all --include-unknown` with
    `--accept-source-agreements --accept-package-agreements
    --disable-interactivity`. winget's "no applicable upgrades" result
-   (`0x8A15002B`) counts as success. When elevated, any other non-zero exit
-   fails the step; when not elevated it is downgraded to a warning (winget
-   can't touch machine-scope packages without Administrator).
+   (`0x8A15002B`) counts as success; any other non-zero exit fails that pass.
    Packages listed in `winget_ignore.txt`, next to the script, are
    `--exclude`d from the upgrade — copy
    [`winget_ignore.sample.txt`](scripts/maintenance/winget_ignore.sample.txt)
