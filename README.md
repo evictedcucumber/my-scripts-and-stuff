@@ -88,24 +88,22 @@ generated symlink into the Nix store and shouldn't be edited directly.
 Windows-side helper (not run from WSL/bash) that runs a batch of maintenance
 and health tasks in one pass — Windows Update, winget, DISM/SFC repair, Disk
 Cleanup, WSL disk compaction, a disk / event-log health check, drive
-optimization and a Defender update + scan, plus driver updates with
-`-DriverUpdate` — and prints an `OK` / `WARN` / `FAIL` / `SKIP` summary at the
+optimization, driver updates and a Defender update + full scan — and prints an `OK` / `WARN` / `FAIL` / `SKIP` summary at the
 end. Steps are independent — one failing does not abort the rest — and the
 script exits non-zero if any step failed. `WARN` means a step finished but found
 something worth a look (a health finding, a guard that held work back); it does
-not fail the run. It never reboots.
+not fail the run. It never reboots. **It takes no options**: every run does everything, and
+it's unattended after one up-front question.
 
 **It asks before doing anything.** The script first prints what it is about to
 do, with the destructive parts (Disk Cleanup empties the Recycle Bin; component
 store cleanup drops superseded component versions) and the disruptive parts
 (`wsl --shutdown` ends every running WSL session and anything that depends on it,
 including a WSL shell you may have started the script from; winget may close
-running apps) called out, and asks `Proceed? [y/N]`. Declining exits with code 1
-without changing anything. `-Yes` skips the question (the plan is still printed) and is
-required for unattended runs — a non-interactive session without it declines.
-After you confirm, it warns about an already-pending reboot and nearly-full
-volumes, and creates a System Restore point (`-SkipRestorePoint` to skip;
-Windows declines if System Protection is off or one was made in the last 24
+running apps) called out, and asks `Proceed? [y/N]` — the only prompt in the run.
+Declining (or a non-interactive session) exits with code 1 without changing
+anything. After you confirm, it warns about an already-pending reboot and
+nearly-full volumes, and creates a System Restore point (Windows declines if System Protection is off or one was made in the last 24
 hours — the script says so and carries on).
 
 **Each step runs in its own console window.** The orchestrator re-invokes the
@@ -115,41 +113,24 @@ end of the run). That keeps each step's noisy output — winget's table redraws,
 the DISM progress bar, `Optimize-Volume -Verbose` — in a separate window and a
 per-step `output.log`, leaving the orchestrator window a clean
 one-line-per-step progress list. A step window auto-closes a few seconds after
-a successful step and stays open (waiting for Enter) on failure; the run
+its step finishes, pass or fail — nothing waits for a keypress — and the run
 directory (`%TEMP%\windows_maintenance_<timestamp>\<Step>\`) is kept afterward.
-`-KeepStepWindows` keeps every step window open. (`Start-Transcript` on
+Console QuickEdit is switched off in step windows so a stray click can't freeze
+them. (`Start-Transcript` on
 Windows PowerShell 5.1 may not capture native-EXE output in full — the live
 window always shows everything.)
 
-It does **not** require elevation to start. Everything except the winget user
-pass needs Administrator; if any such step is going to run and the session is
-not elevated, the script **relaunches itself elevated in a new console** (one
-UAC prompt, after the confirmation above), runs there, mirrors that run's exit
-code, and leaves the window open at the end so the summary is readable.
-`-NoElevate` suppresses the relaunch — those steps are then marked `SKIP` (not
-`FAIL`) and the run exits non-zero. The winget user pass always runs de-elevated
-(if the script is already elevated, e.g. via `sudo pwsh -File ...`, it is
-launched with a basic-user token through `runas /trustlevel`). An explicit
-`-Skip…` always wins over both.
+It does **not** require elevation to start. Nearly every step needs
+Administrator, so the script **relaunches itself elevated in a new console**
+(one UAC prompt, after the confirmation above), runs there, and mirrors that
+run's exit code; the summary is saved as `summary.txt` in the run directory and
+echoed by the original window when the elevated one closes. Declining UAC exits
+non-zero. The winget user pass always runs de-elevated (if the script is already
+elevated, e.g. via `sudo pwsh -File ...`, it is launched with a basic-user token
+through `runas /trustlevel`).
 
 ```powershell
-# full pass — asks to confirm, then prompts for elevation if not already admin
 .\scripts\maintenance\windows_maintenance.ps1
-
-# also install Windows Update driver updates (verified/WHQL only)
-.\scripts\maintenance\windows_maintenance.ps1 -DriverUpdate
-
-# leave WSL alone (no wsl --shutdown, no compaction; a running WSL keeps Microsoft.WSL held back)
-.\scripts\maintenance\windows_maintenance.ps1 -SkipWslCompact
-
-# full Defender scan instead of a quick one (can take hours)
-.\scripts\maintenance\windows_maintenance.ps1 -DefenderFullScan
-
-# skip the slow ones
-.\scripts\maintenance\windows_maintenance.ps1 -SkipWindowsUpdate -SkipDefrag -SkipIntegrity
-
-# no elevation, no UAC prompt, no question: just the user-scope winget pass
-.\scripts\maintenance\windows_maintenance.ps1 -NoElevate -Yes -SkipWindowsUpdate -SkipIntegrity -SkipDiskCleanup -SkipWslCompact -SkipHealthCheck -SkipDefrag -SkipDefender
 ```
 
 1. **Windows Update** — installs all applicable *software* updates via the
@@ -159,13 +140,13 @@ launched with a basic-user token through `runas /trustlevel`). An explicit
    Microsoft products; the Microsoft Update service is registered on first use
    (the same switch as Settings → "Receive updates for other Microsoft
    products"), and if that fails the step carries on with Windows Update only.
-   Drivers are excluded here — they only come with `-DriverUpdate` (step 2).
+   Drivers are excluded here — they come from step 2.
    If the module is missing it is installed from the PSGallery on first run
    (`Install-Module`, `CurrentUser` scope; the NuGet provider is bootstrapped
    first, and PSGallery may prompt once to trust it on a locked-down host).
    Automatic reboots are suppressed; a resulting pending reboot is reported in
    the summary only.
-2. **Driver updates** *(only with `-DriverUpdate`)* — `Get-WindowsUpdate
+2. **Driver updates** — `Get-WindowsUpdate
    -UpdateType Driver -Install` via the same PSWindowsUpdate module as step 1.
    This is the "verified drivers only" path: every driver on Windows Update is
    WHQL-certified and submitted by the hardware vendor through Microsoft's
@@ -178,7 +159,7 @@ launched with a basic-user token through `runas /trustlevel`). An explicit
    upgrade). Each is `winget upgrade --all --include-unknown` with
    `--accept-source-agreements --accept-package-agreements
    --disable-interactivity`. winget's "no applicable upgrades" result
-   (`0x8A15002B`) counts as success; any other non-zero exit fails that pass.
+   (`0x8A15002B`) counts as success; if some packages fail to upgrade, the rest are still attempted and the pass is recorded as `WARN` with the failed-package count; any other non-zero exit fails that pass.
    Packages listed in `winget_ignore.txt`, next to the script, are
    `--exclude`d from the upgrade — copy
    [`winget_ignore.sample.txt`](scripts/maintenance/winget_ignore.sample.txt)
@@ -186,14 +167,9 @@ launched with a basic-user token through `runas /trustlevel`). An explicit
    line (`#` comments and blank lines allowed); the file is optional and
    nothing is excluded on its account if it's absent.
    WSL and winget: upgrading `Microsoft.WSL` runs `wsl --shutdown`. Because
-   the up-front confirmation already covers a WSL shutdown (unless you pass
-   `-SkipWslCompact`), the package is upgraded normally. With `-SkipWslCompact`
-   no shutdown is approved, so if a WSL distro is running (checked via
-   `vmmemWSL` / `wsl -l --running`) `Microsoft.WSL` is `--exclude`d instead and
-   the summary notes it was held back. On a winget too old for `--exclude`: a
-   configured ignore list is skipped with a warning (upgrade proceeds), but a
-   pending WSL upgrade instead marks the whole step `SKIP`, since dropping a
-   live session is worse than an unexcluded package.
+   the up-front confirmation already covers a WSL shutdown, the package is
+   upgraded normally. On a winget too old for `--exclude`, a configured ignore
+   list is skipped with a warning (the upgrade proceeds).
 4. **System file integrity** — `DISM /Online /Cleanup-Image /RestoreHealth`
    (scans the component store and repairs it only if damaged), then
    `sfc /scannow`. The sfc outcome is read from the `[SR]` entries in `CBS.log`
@@ -248,39 +224,21 @@ launched with a basic-user token through `runas /trustlevel`). An explicit
    picks the media-appropriate action per volume (defrag on HDD, retrim on SSD),
    same as the built-in "Optimize Drives" task / `defrag /O`. A volume whose
    disk reports anything but `Healthy` is skipped (`WARN`) — back it up first.
-9. **Microsoft Defender** — `Update-MpSignature`, then a quick scan (a full
-   scan with `-DefenderFullScan`), then reports signature age, real-time
+9. **Microsoft Defender** — `Update-MpSignature`, then a full scan (can
+   take hours), then reports signature age, real-time
    protection and threats. An active threat is a `FAIL`; a detection Defender
    already handled during the scan, stale signatures (> 3 days) or real-time
    protection being off are `WARN`s. `SKIP`ped when Defender isn't the active
    antivirus (a third-party product has put it in passive mode).
 
-- `-Yes` — skip the up-front `Proceed? [y/N]` question (the plan is still
-  printed). Required for unattended runs.
-- `-DriverUpdate` — add step 2 (Windows Update driver updates). Off by default.
-- `-DefenderFullScan` — make step 9 a Defender full scan instead of a quick one.
-- `-SkipWindowsUpdate`, `-SkipWinget`, `-SkipIntegrity`, `-SkipDiskCleanup`,
-  `-SkipWslCompact`, `-SkipHealthCheck`, `-SkipDefrag`, `-SkipDefender` — skip
-  the matching step. An explicit skip wins over the elevation logic: if it
-  leaves no admin-only step to run, there is no relaunch and no non-zero exit.
-  `-SkipWslCompact` also means the script does not shut WSL down (see step 3).
-- `-SkipRestorePoint` — don't create a System Restore point before the run.
-- `-SagerunProfile <0-65535>` — the Disk Cleanup sageset/sagerun profile number
-  used for the `StateFlags` values and `cleanmgr /sagerun:N`; default `100`.
-  Change it only if that profile number is already in use on the box.
-- `-KeepStepWindows` — keep every per-step console window open until dismissed
-  (press Enter), instead of auto-closing after a successful step.
-- `-NoElevate` — never relaunch elevated; skip the admin-only steps instead
-  (exit non-zero). For unattended runs where a UAC prompt can't be answered.
-- `-Relaunched`, `-AllowWslShutdown`, `-RunStep`, `-RunDir` — internal, set by
-  the script when it relaunches itself (for elevation) or launches a step's
-  window; don't pass them by hand.
+- `-Relaunched`, `-RunStep`, `-RunDir` — internal, set by the script when it
+  relaunches itself (for elevation) or launches a step's window; don't pass
+  them by hand. There are no user-facing options.
 
 Written for desktops: there are no battery / AC-power checks.
 
 Requires: Windows 10/11 (or matching Server), PowerShell 5.1+. No
-`#Requires -RunAsAdministrator` — the script self-elevates when an admin-only
-step is due (or, with `-NoElevate`, skips it). Internet access for steps 1–4
+`#Requires -RunAsAdministrator` — the script self-elevates. Internet access for steps 1–4
 (and 9's signature update); `winget` (App Installer) on `PATH`; `cleanmgr.exe`,
 `DISM`, `sfc` and the Storage / Defender modules (all in-box, though cleanmgr is
 an optional Feature on Server). For step 6: `wsl.exe`, the Hyper-V PowerShell

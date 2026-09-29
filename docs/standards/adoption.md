@@ -119,7 +119,7 @@ clean, parse under a `PSUseCompatibleSyntax` (5.1) check, set strict mode and
 
 | Rule | File | Status |
 | --- | --- | --- |
-| `PS-50`, `GEN-33`, `GEN-36` | `windows_maintenance.ps1` | **Needs a design decision.** No `-WhatIf`, and Disk Cleanup empties the Recycle Bin. The up-front plan plus the `[y/N]` prompt (or `-Yes`) is the only gate. Each step runs in its own process, so `-WhatIf` would have to be honoured by the orchestrator (list the steps and skip launching them) and by the elevated relaunch. Decide whether `-Yes` counts as the explicit opt-in `GEN-33` asks for, or add `-WhatIf`. |
+| `PS-50`, `GEN-33`, `GEN-36` | `windows_maintenance.ps1` | **Needs a design decision.** No `-WhatIf`, and Disk Cleanup empties the Recycle Bin. The up-front plan plus the single `[y/N]` prompt is the only gate. Each step runs in its own process, so `-WhatIf` would have to be honoured by the orchestrator (list the steps and skip launching them) and by the elevated relaunch. Decide whether that prompt counts as the explicit opt-in `GEN-33` asks for, or add `-WhatIf`. |
 | `PS-15` | `windows_maintenance.ps1`, `register_yubikey_attach_task.ps1` | Backtick continuation remains in several calls; tolerated for existing code. |
 | `GEN-13` | `windows_maintenance.ps1` | About 110 lines exceed 100 columns, mostly long string literals and `param`/`Write-Warning` lines, which the rule allows. Not audited line by line. |
 

@@ -3,9 +3,9 @@
     Runs a batch of Windows maintenance and health tasks in one pass: Windows
     Update, winget upgrades (user + system passes), DISM/SFC system file repair,
     Disk Cleanup, WSL disk compaction, a disk / event-log health check, per-volume
-    optimization (defrag / retrim), a Microsoft Defender update + scan, and - with
-    -DriverUpdate - Windows Update driver updates. Asks for confirmation up front,
-    because some of it is destructive or disruptive.
+    optimization (defrag / retrim), a Microsoft Defender full scan and Windows
+    Update driver updates. Takes no options: it asks for confirmation once, up
+    front (some of it is destructive or disruptive), then runs unattended.
 
 .DESCRIPTION
     Runs the steps below in order. Each step is independent - a failure is
@@ -21,9 +21,9 @@
     run). That keeps each step's noisy output - winget's table redraws, the
     DISM progress bar, Optimize-Volume -Verbose - in a separate window and a
     per-step output.log, leaving the orchestrator window a clean progress list.
-    A step window closes a few seconds after a successful step and stays open
-    (waiting for Enter) on failure; -KeepStepWindows keeps every step window
-    open.
+    A step window closes a few seconds after its step finishes, pass or fail
+    (the outcome is in the summary and the step's output.log); nothing ever
+    waits for a keypress.
 
     Before anything runs the script prints what it is about to do - calling out
     the destructive actions (Disk Cleanup empties the Recycle Bin and deletes
@@ -31,23 +31,19 @@
     and the disruptive ones
     (wsl --shutdown ends every running WSL session and anything that depends on
     it; winget may close running apps) - and asks for confirmation. Declining
-    exits with code 1 without changing anything. -Yes skips the question
-    (needed for unattended runs; the plan is still printed). After confirmation
-    it runs preflight checks (warns about an already-pending reboot and
-    nearly-full volumes) and creates a System Restore point before making
-    changes (-SkipRestorePoint to skip; Windows may decline if System
-    Protection is off or a point was already created in the last 24 hours).
+    (or running without an interactive console) exits with code 1 without
+    changing anything. This is the only question the script asks. After
+    confirmation it runs preflight checks (warns about an already-pending
+    reboot and nearly-full volumes) and creates a System Restore point before
+    making changes (Windows may decline if System Protection is off or a point
+    was already created in the last 24 hours).
 
     The script does not require elevation to start. If it is launched without
-    Administrator and any step that needs it (Windows Update, winget system
-    pass, integrity repair, Disk Cleanup, WSL compaction, health check, defrag,
-    Defender) is going to run, the script relaunches itself elevated in a new
-    console (one UAC prompt, asked after the confirmation above), runs there,
-    and exits with that run's exit code;
-    the elevated window stays open at the end so its output is readable. Pass
-    -NoElevate to suppress the relaunch - the admin-only steps are then marked
-    SKIP (not FAIL) and the run exits non-zero. The winget user pass
-    never runs elevated.
+    Administrator it relaunches itself elevated in a new console (one UAC
+    prompt, asked after the confirmation above), runs there, and exits with
+    that run's exit code; the summary is written to summary.txt in the run
+    directory and echoed by the original window when the elevated run ends.
+    Declining UAC exits non-zero. The winget user pass never runs elevated.
 
       1. Windows Update
          Scans, downloads, and installs all applicable software updates via the
@@ -55,14 +51,14 @@
          (the Microsoft Update service is registered on first use - the same
          switch as "Receive updates for other Microsoft products" in Settings;
          if that fails the step carries on with Windows Update only). Drivers
-         are excluded (-UpdateType Software) - they only come with -DriverUpdate.
+         are excluded (-UpdateType Software) - they come from step 2.
          If the module is not installed it is pulled
          from the PowerShell Gallery on first run (Install-Module, CurrentUser
          scope; the NuGet package provider is bootstrapped first if needed).
          Automatic reboots are suppressed (-IgnoreReboot); a resulting pending
          reboot is reported in the summary but not acted on.
 
-      2. Driver updates  (only with -DriverUpdate)
+      2. Driver updates
          Installs driver updates offered through Windows Update
          (Get-WindowsUpdate -UpdateType Driver, same PSWindowsUpdate module as
          step 1). This is the "verified drivers only" path: every driver on
@@ -79,11 +75,13 @@
          A system pass then runs elevated with no scope filter, covering
          machine-scope packages and anything the user pass missed. The system
          pass is an admin-only step, so it follows the same self-elevation
-         (UAC) / -NoElevate rules as the others. Both use the settings below.
+         (UAC) rules as the others.
          Run non-interactively with --accept-source-agreements,
          --accept-package-agreements and --disable-interactivity. winget's
          "no applicable upgrades" result (0x8A15002B) is treated as success.
-         Any other non-zero exit fails that pass.
+         winget attempts every package; if some fail (installer reported a
+         failure) the pass is recorded as WARN with the number of failed
+         packages. Any other non-zero exit fails that pass.
 
          Packages listed in winget_ignore.txt, next to this script (see
          winget_ignore.sample.txt), are passed as --exclude and skipped by
@@ -91,15 +89,11 @@
          excluded on its account.
 
          WSL and winget: upgrading the WSL package (Microsoft.WSL) runs
-         "wsl --shutdown". When WSL compaction is enabled (the default) the
-         up-front confirmation already covers a WSL shutdown, so the package is
-         upgraded normally. With -SkipWslCompact no shutdown is authorised, so
-         if a WSL distribution is running Microsoft.WSL is excluded from the
-         upgrade (--exclude) instead. If this winget build has no --exclude: a
+         "wsl --shutdown". The
+         up-front confirmation covers a WSL shutdown, so the package is
+         upgraded normally. If this winget build has no --exclude, a
          configured ignore list is skipped with a warning and the upgrade
-         proceeds anyway; a pending WSL upgrade instead marks the whole step
-         SKIP, since dropping a live session is worse than an unexcluded
-         package.
+         proceeds anyway.
 
       4. System file integrity (DISM + SFC)
          "DISM /Online /Cleanup-Image /RestoreHealth" (scans the component
@@ -144,8 +138,7 @@
          fstrim'ed. A power loss or crash mid-compaction can corrupt a distro
          disk - keep backups ("wsl --export"). Distros are read from the
          current user's registry (HKCU), so this needs the same account
-         elevated, not a different admin account. Skipped with
-         -SkipWslCompact.
+         elevated, not a different admin account.
 
       7. Health check  (report only)
          Physical disk health and SSD wear/temperature/error counters
@@ -167,75 +160,15 @@
          volume whose disk reports anything but Healthy is skipped (WARN).
 
       9. Microsoft Defender update + scan
-         Update-MpSignature, then a quick scan (a full scan with
-         -DefenderFullScan), then reports signature age, real-time protection
+         Update-MpSignature, then a full scan (can take hours),
+         then reports signature age, real-time protection
          and any threats found (an active threat fails the step; a detection
          Defender already handled is a WARN). Skipped when Defender is not the
          active antivirus (a third-party product has put it in passive mode).
 
-.PARAMETER DriverUpdate
-    Also install driver updates offered through Windows Update (WHQL-signed,
-    vendor-submitted - see step 2). Off by default.
-
-.PARAMETER DefenderFullScan
-    Run a Defender full scan in step 9 instead of a quick scan. Can take hours.
-
-.PARAMETER SkipWindowsUpdate
-    Skip step 1 (Windows Update).
-
-.PARAMETER SkipWinget
-    Skip step 3 (winget upgrade, both passes).
-
-.PARAMETER SkipIntegrity
-    Skip step 4 (DISM RestoreHealth + SFC).
-
-.PARAMETER SkipDiskCleanup
-    Skip step 5 (cleanmgr + DISM component cleanup).
-
-.PARAMETER SkipWslCompact
-    Skip step 6 (WSL disk compaction). Because that step is what needs the
-    "wsl --shutdown" approval, skipping it also means the script does not
-    shut WSL down: a running WSL keeps Microsoft.WSL held back in step 3.
-
-.PARAMETER SkipHealthCheck
-    Skip step 7 (disk / event-log health check).
-
-.PARAMETER SkipDefrag
-    Skip step 8 (Optimize-Volume).
-
-.PARAMETER SkipDefender
-    Skip step 9 (Defender update + scan).
-
-.PARAMETER SkipRestorePoint
-    Do not create a System Restore point before the run changes anything.
-
-.PARAMETER SagerunProfile
-    The Disk Cleanup "sageset/sagerun" profile number used for the StateFlags
-    registry values and "cleanmgr /sagerun:N". Default 100. Change it only if
-    that profile number is already configured for something else on this box.
-
-.PARAMETER Yes
-    Skip the up-front confirmation question (the plan is still printed).
-    Required for unattended runs; without it a non-interactive session
-    declines and exits.
-
-.PARAMETER KeepStepWindows
-    Keep every per-step console window open until dismissed (press Enter),
-    instead of auto-closing a few seconds after a successful step.
-
-.PARAMETER NoElevate
-    Do not relaunch elevated when an admin-only step is due to run. Those steps
-    are skipped instead and the run exits non-zero. Use this for unattended
-    runs where a UAC prompt cannot be answered.
-
 .PARAMETER Relaunched
     Internal. Set by the script on its own elevated relaunch (after the
-    confirmation was already given); keeps the orchestrator window open at the
-    end. Not meant to be passed by hand.
-
-.PARAMETER AllowWslShutdown
-    Internal. Set by the orchestrator on each step it launches when the
-    confirmation covered "wsl --shutdown". Not meant to be passed by hand.
+    confirmation was already given). Not meant to be passed by hand.
 
 .PARAMETER RunStep
     Internal. Names the single step to run in this process (the orchestrator
@@ -249,28 +182,18 @@
 .EXAMPLE
     .\windows_maintenance.ps1
 
-    Prints the plan, asks to confirm, then runs every step (prompting for UAC
-    elevation if not already an administrator).
-
-.EXAMPLE
-    .\windows_maintenance.ps1 -Yes -SkipWslCompact -SkipDefrag
-
-    Unattended pass that leaves WSL alone and skips the volume optimization.
-
-.EXAMPLE
-    .\windows_maintenance.ps1 -NoElevate -Yes -SkipWindowsUpdate -SkipIntegrity -SkipDiskCleanup -SkipWslCompact -SkipHealthCheck -SkipDefrag -SkipDefender
-
-    No elevation and no question: only the user-scope winget pass runs.
+    Prints the plan, asks once to confirm, then runs every step unattended
+    (prompting for UAC elevation if not already an administrator).
 
 .NOTES
     Requirements: Windows 10 / 11 (or matching Server), PowerShell 5.1+. No
     #Requires -RunAsAdministrator: the script self-elevates when a step needs
-    it (see .DESCRIPTION), or with -NoElevate skips those steps. Per step:
+    it (see .DESCRIPTION). Per step:
       - Windows Update (needs Administrator): internet access; PSWindowsUpdate
         (auto-installed from PSGallery via Install-Module if absent - this also
         registers the NuGet provider and may prompt once to trust PSGallery on
         a locked-down host).
-      - Driver updates (-DriverUpdate, needs Administrator): same requirements
+      - Driver updates (needs Administrator): same requirements
         as Windows Update (internet, PSWindowsUpdate).
       - winget: App Installer / winget (in-box on Windows 11 and current
         Windows 10). The system pass needs Administrator; the user pass is
@@ -305,29 +228,9 @@
 
 [CmdletBinding()]
 param(
-    [switch]$DriverUpdate,
-    [switch]$DefenderFullScan,
-
-    [switch]$SkipWindowsUpdate,
-    [switch]$SkipWinget,
-    [switch]$SkipIntegrity,
-    [switch]$SkipDiskCleanup,
-    [switch]$SkipWslCompact,
-    [switch]$SkipHealthCheck,
-    [switch]$SkipDefrag,
-    [switch]$SkipDefender,
-    [switch]$SkipRestorePoint,
-
-    [ValidateRange(0, 65535)]
-    [int]$SagerunProfile = 100,
-
-    [switch]$Yes,
-    [switch]$KeepStepWindows,
-    [switch]$NoElevate,
-
     # Internal - set by the script when it relaunches itself / launches a step.
+    # There are no user-facing options: every run does everything.
     [switch]$Relaunched,
-    [switch]$AllowWslShutdown,
     [ValidateSet('WindowsUpdate', 'DriverUpdate', 'Winget', 'WingetSystem', 'Integrity', 'DiskCleanup', 'WslCompact', 'HealthCheck', 'Defrag', 'Defender')]
     [string]$RunStep,
     [string]$RunDir
@@ -362,13 +265,10 @@ $ErrorActionPreference = 'Stop'
 
 $script:Results = [System.Collections.Generic.List[psobject]]::new()
 $script:RebootRequired = $false
-$script:SkippedForAdmin = $false
 $script:IsAdmin = $false
 $script:StepDetail = ''
 $script:StepStatus = 'OK'
 $script:StepCount = 0
-$script:AllowWslShutdown = $false
-$script:DefenderFullScan = $false
 $script:StepTitles = @{
     WindowsUpdate = 'Windows Update'
     DriverUpdate  = 'Driver updates (Windows Update)'
@@ -457,25 +357,10 @@ function Invoke-Step {
     param(
         [Parameter(Mandatory)] [string] $Name,
         [Parameter(Mandatory)] [ValidateScript({ $script:StepTitles.ContainsKey($_) })] [string] $Step,
-        [switch] $Skip,
-        [switch] $RequiresAdmin,
         [switch] $Unelevated
     )
 
     $ordinal = '[{0}/{1}] {2}' -f ($script:Results.Count + 1), $script:StepCount, $Name
-
-    if ($Skip) {
-        Write-Output "$ordinal - skipped (-Skip... switch)"
-        $script:Results.Add([pscustomobject]@{ Step = $Name; Status = 'SKIP'; Detail = 'requested' })
-        return
-    }
-
-    if ($RequiresAdmin -and -not $script:IsAdmin) {
-        Write-Warning "$ordinal - skipped: needs Administrator (drop -NoElevate to auto-elevate)"
-        $script:SkippedForAdmin = $true
-        $script:Results.Add([pscustomobject]@{ Step = $Name; Status = 'SKIP'; Detail = 'needs Administrator (not elevated)' })
-        return
-    }
 
     $stepDir = Join-Path $script:RunDir $Step
     $resultFile = Join-Path $stepDir 'result.json'
@@ -490,18 +375,7 @@ function Invoke-Step {
         $Step
         '-RunDir'
         (Format-ProcessArgument $script:RunDir)
-        '-SagerunProfile'
-        ([string]$script:SagerunProfile)
     )
-    if ($script:KeepStepWindows) {
-        $childArgs += '-KeepStepWindows'
-    }
-    if ($script:AllowWslShutdown) {
-        $childArgs += '-AllowWslShutdown'
-    }
-    if ($script:DefenderFullScan) {
-        $childArgs += '-DefenderFullScan'
-    }
 
     Write-Output "$ordinal - running in a separate window..."
     $start = Get-Date
@@ -556,17 +430,41 @@ function Invoke-Step {
     $script:Results.Add([pscustomobject]@{ Step = $Name; Status = $status; Detail = $detail })
 }
 
+function Disable-ConsoleQuickEdit {
+    # A stray click in a console window with QuickEdit on starts a text
+    # selection, which freezes the running program's output until Enter/Esc is
+    # pressed - so a step (DISM especially) looks hung. Turn QuickEdit off for
+    # this step's window; failures are non-fatal.
+    try {
+        if (-not ('MaintenanceConsole' -as [type])) {
+            Add-Type -Namespace '' -Name 'MaintenanceConsole' -MemberDefinition @'
+[DllImport("kernel32.dll", SetLastError = true)] public static extern System.IntPtr GetStdHandle(int nStdHandle);
+[DllImport("kernel32.dll", SetLastError = true)] public static extern bool GetConsoleMode(System.IntPtr hConsole, out uint mode);
+[DllImport("kernel32.dll", SetLastError = true)] public static extern bool SetConsoleMode(System.IntPtr hConsole, uint mode);
+'@
+        }
+        $handle = [MaintenanceConsole]::GetStdHandle(-10)   # STD_INPUT_HANDLE
+        $mode = [uint32]0
+        if ([MaintenanceConsole]::GetConsoleMode($handle, [ref]$mode)) {
+            # Clear ENABLE_QUICK_EDIT_MODE (0x40); set ENABLE_EXTENDED_FLAGS (0x80) so it takes effect.
+            [void][MaintenanceConsole]::SetConsoleMode($handle, ($mode -band (-bnot [uint32]0x40)) -bor 0x80)
+        }
+    }
+    catch {
+        Write-Verbose "Could not disable QuickEdit: $($_.Exception.Message)"
+    }
+}
+
 function Invoke-MaintenanceStep {
     # Child side: run exactly one step in this process, capture its console to a
     # transcript, write result.json for the orchestrator, and exit.
     param(
         [Parameter(Mandatory)] [ValidateScript({ $script:StepTitles.ContainsKey($_) })] [string] $Step,
-        [Parameter(Mandatory)] [string] $RunDir,
-        [Parameter(Mandatory)] [int] $SagerunProfile,
-        [switch] $KeepOpen
+        [Parameter(Mandatory)] [string] $RunDir
     )
 
     $title = $script:StepTitles[$Step]
+    Disable-ConsoleQuickEdit
 
     $stepDir = Join-Path $RunDir $Step
     New-Item -ItemType Directory -Path $stepDir -Force | Out-Null
@@ -604,7 +502,7 @@ function Invoke-MaintenanceStep {
             'Winget' { Invoke-WingetUpgrade -Scope User }
             'WingetSystem' { Invoke-WingetUpgrade -Scope System }
             'Integrity' { Invoke-IntegrityRepair }
-            'DiskCleanup' { Invoke-DiskCleanup -SagerunProfile $SagerunProfile }
+            'DiskCleanup' { Invoke-DiskCleanup -SagerunProfile $script:SagerunProfile }
             'WslCompact' { Invoke-WslCompaction }
             'HealthCheck' { Invoke-HealthCheck }
             'Defrag' { Invoke-VolumeOptimization }
@@ -654,17 +552,9 @@ function Invoke-MaintenanceStep {
         default { Write-Warning "Step failed: $detail" }
     }
 
-    if ($status -eq 'FAIL' -or $KeepOpen) {
-        try {
-            [void](Read-Host 'Press Enter to close this window')
-        }
-        catch {
-            Write-Verbose "Could not pause for input: $($_.Exception.Message)"
-        }
-    }
-    else {
-        Start-Sleep -Seconds 3
-    }
+    # Never wait for a keypress: the outcome is in the orchestrator's summary
+    # and this step's output.log. Linger briefly so the result is glanceable.
+    Start-Sleep -Seconds 3
 
     if ($status -eq 'FAIL') {
         exit 1
@@ -871,91 +761,57 @@ function Test-FileLocked {
 # ---------------------------------------------------------------------------
 
 function Get-MaintenancePlan {
-    # What this run is about to do, grouped by how much it can hurt. Reads the
-    # script's own -Skip... / -DriverUpdate switches. $AdminStepsWillRun is
-    # false only for -NoElevate without elevation (those steps get skipped).
-    param(
-        [Parameter(Mandatory)] [bool] $AdminStepsWillRun
-    )
-
+    # What this run is about to do, grouped by how much it can hurt. Reports
+    # everything the script does (it has no options).
     $destructive = [System.Collections.Generic.List[string]]::new()
     $disruptive = [System.Collections.Generic.List[string]]::new()
     $other = [System.Collections.Generic.List[string]]::new()
 
-    if (-not $SkipWinget) {
-        $disruptive.Add('winget upgrade --all: upgrades every installed app. An app that is running may be closed or restarted by its installer, and a failed upgrade can leave an app broken until reinstalled.')
-    }
+    $disruptive.Add('winget upgrade --all: upgrades every installed app. An app that is running may be closed or restarted by its installer, and a failed upgrade can leave an app broken until reinstalled.')
 
-    if ($AdminStepsWillRun) {
-        # wsl --shutdown comes from two places: the compaction step (needs the
-        # Hyper-V module, otherwise it skips itself before shutting anything
-        # down) and winget upgrading Microsoft.WSL (no longer held back once a
-        # shutdown is approved).
-        $wslPresent = [bool](Get-Command -Name wsl.exe -CommandType Application -ErrorAction SilentlyContinue)
-        $canCompact = -not $SkipWslCompact -and [bool](Get-Command -Name Optimize-VHD -ErrorAction SilentlyContinue)
-        $shutdownSources = [System.Collections.Generic.List[string]]::new()
-        if ($canCompact) {
-            $shutdownSources.Add('the WSL disk compaction step')
-        }
-        if ($script:AllowWslShutdown -and -not $SkipWinget) {
-            $shutdownSources.Add('winget if it upgrades Microsoft.WSL')
-        }
-        if ($wslPresent -and $shutdownSources.Count -gt 0) {
-            $distros = @(Get-WslInventory)
-            $distroText = if ($distros.Count -gt 0) {
-                'Registered distros: ' + (($distros | ForEach-Object { $_.Name }) -join ', ') + '.'
-            }
-            else {
-                'No distros are registered for this user.'
-            }
-            $runningText = if (Test-WslRunning) { 'WSL is running right now.' } else { 'WSL is not running right now.' }
-            $dockerText = if (Get-Process -Name 'Docker Desktop' -ErrorAction SilentlyContinue) {
-                ' Docker Desktop is running and will lose its WSL backend.'
-            }
-            else {
-                ''
-            }
-            $disruptive.Add("wsl --shutdown (run by $($shutdownSources -join ' and ')): every running WSL distro is terminated immediately - unsaved work, running processes, containers, and remote sessions (VS Code, SSH) inside WSL are lost, including the terminal this script may have been started from if that is a WSL shell. $distroText $runningText$dockerText")
-        }
-        if ($canCompact -and $wslPresent) {
-            $disruptive.Add('WSL disk compaction: each distro disk (.vhdx) is trimmed and then compacted with Optimize-VHD while WSL is stopped, and WSL is left stopped afterwards. A power loss or crash mid-compaction can corrupt a distro disk - back up anything irreplaceable first (wsl --export).')
-        }
-        elseif (-not $SkipWslCompact -and $wslPresent) {
-            $other.Add('WSL disk compaction will be skipped: the Hyper-V PowerShell module (Optimize-VHD) is not installed.')
-        }
-        if (-not $SkipDiskCleanup) {
-            $destructive.Add('Disk Cleanup on every fixed drive: empties the Recycle Bin and deletes temp files, error reports, thumbnails, Delivery Optimization and Windows Update leftovers. Not touched: the Downloads folder, previous Windows installation(s), device driver packages and Windows ESD files.')
-            $destructive.Add('DISM component store cleanup: removes superseded Windows component versions to free WinSxS space; they cannot be restored afterwards.')
-        }
-        if ($DriverUpdate) {
-            $disruptive.Add('Driver updates (-DriverUpdate): may replace graphics / network / storage drivers - the screen or network can drop briefly and a faulty driver can misbehave (a restore point is created first).')
-        }
-        if (-not $SkipWindowsUpdate) {
-            $other.Add('Windows Update: installs OS updates plus Office and other Microsoft product updates (registers the Microsoft Update service if it is not already - the "Receive updates for other Microsoft products" setting). A reboot may be needed afterwards; this script never reboots.')
-        }
-        if (-not $SkipIntegrity) {
-            $other.Add('System file repair: DISM RestoreHealth and sfc /scannow replace damaged Windows files with good copies (RestoreHealth may download them from Windows Update).')
-        }
-        if (-not $SkipHealthCheck) {
-            $other.Add('Health check: read-only disk / filesystem / event-log report (nothing is repaired).')
-        }
-        if (-not $SkipDefrag) {
-            $other.Add('Optimize volumes: defrag on HDDs, retrim on SSDs.')
-        }
-        if (-not $SkipDefender) {
-            $scanKind = if ($DefenderFullScan) { 'full scan (can take hours)' } else { 'quick scan' }
-            $other.Add("Microsoft Defender: signature update and a $scanKind.")
-        }
-        if (-not $SkipRestorePoint -and -not ($SkipWindowsUpdate -and $SkipIntegrity -and $SkipDiskCleanup -and -not $DriverUpdate)) {
-            $other.Add('A System Restore point is created first (skipped by Windows if System Protection is off or one was made in the last 24 hours).')
-        }
-        if ($disruptive.Count -gt 0 -or $destructive.Count -gt 0 -or $other.Count -gt 0) {
-            $other.Add('Expect heavy CPU and disk use for a while (DISM, Disk Cleanup, optimize, Defender). Each step runs in its own console window.')
-        }
+    # wsl --shutdown comes from two places: the compaction step (needs the
+    # Hyper-V module, otherwise it skips itself before shutting anything down)
+    # and winget upgrading Microsoft.WSL.
+    $wslPresent = [bool](Get-Command -Name wsl.exe -CommandType Application -ErrorAction SilentlyContinue)
+    $canCompact = [bool](Get-Command -Name Optimize-VHD -ErrorAction SilentlyContinue)
+    $shutdownSources = [System.Collections.Generic.List[string]]::new()
+    if ($canCompact) {
+        $shutdownSources.Add('the WSL disk compaction step')
     }
-    else {
-        $other.Add('Not elevated and -NoElevate given: Windows Update, integrity repair, Disk Cleanup, WSL compaction, health check, optimize and Defender will be skipped; the winget system pass is skipped too.')
+    $shutdownSources.Add('winget if it upgrades Microsoft.WSL')
+    if ($wslPresent) {
+        $distros = @(Get-WslInventory)
+        $distroText = if ($distros.Count -gt 0) {
+            'Registered distros: ' + (($distros | ForEach-Object { $_.Name }) -join ', ') + '.'
+        }
+        else {
+            'No distros are registered for this user.'
+        }
+        $runningText = if (Test-WslRunning) { 'WSL is running right now.' } else { 'WSL is not running right now.' }
+        $dockerText = if (Get-Process -Name 'Docker Desktop' -ErrorAction SilentlyContinue) {
+            ' Docker Desktop is running and will lose its WSL backend.'
+        }
+        else {
+            ''
+        }
+        $disruptive.Add("wsl --shutdown (run by $($shutdownSources -join ' and ')): every running WSL distro is terminated immediately - unsaved work, running processes, containers, and remote sessions (VS Code, SSH) inside WSL are lost, including the terminal this script may have been started from if that is a WSL shell. $distroText $runningText$dockerText")
     }
+    if ($canCompact -and $wslPresent) {
+        $disruptive.Add('WSL disk compaction: each distro disk (.vhdx) is trimmed and then compacted with Optimize-VHD while WSL is stopped, and WSL is left stopped afterwards. A power loss or crash mid-compaction can corrupt a distro disk - back up anything irreplaceable first (wsl --export).')
+    }
+    elseif ($wslPresent) {
+        $other.Add('WSL disk compaction will be skipped: the Hyper-V PowerShell module (Optimize-VHD) is not installed.')
+    }
+    $destructive.Add('Disk Cleanup on every fixed drive: empties the Recycle Bin and deletes temp files, error reports, thumbnails, Delivery Optimization and Windows Update leftovers. Not touched: the Downloads folder, previous Windows installation(s), device driver packages and Windows ESD files.')
+    $destructive.Add('DISM component store cleanup: removes superseded Windows component versions to free WinSxS space; they cannot be restored afterwards.')
+    $disruptive.Add('Driver updates: may replace graphics / network / storage drivers - the screen or network can drop briefly and a faulty driver can misbehave (a restore point is created first).')
+    $other.Add('Windows Update: installs OS updates plus Office and other Microsoft product updates (registers the Microsoft Update service if it is not already - the "Receive updates for other Microsoft products" setting). A reboot may be needed afterwards; this script never reboots.')
+    $other.Add('System file repair: DISM RestoreHealth and sfc /scannow replace damaged Windows files with good copies (RestoreHealth may download them from Windows Update).')
+    $other.Add('Health check: read-only disk / filesystem / event-log report (nothing is repaired).')
+    $other.Add('Optimize volumes: defrag on HDDs, retrim on SSDs.')
+    $other.Add('Microsoft Defender: signature update and a full scan (can take hours).')
+    $other.Add('A System Restore point is created first (skipped by Windows if System Protection is off or one was made in the last 24 hours).')
+    $other.Add('Expect heavy CPU and disk use for a long while (DISM, Disk Cleanup, optimize, Defender). Each step runs in its own console window, and after this question the run needs no further input.')
 
     return [pscustomobject]@{
         Destructive = $destructive.ToArray()
@@ -998,7 +854,7 @@ function Test-MaintenanceConsent {
     # True only for an explicit y / yes. Anything else - including no answer or
     # a session that cannot prompt - declines.
     if (-not [Environment]::UserInteractive) {
-        Write-Warning 'Not an interactive session - re-run with -Yes to confirm this plan.'
+        Write-Warning 'Not an interactive session - cannot ask for confirmation, so nothing was changed.'
         return $false
     }
 
@@ -1007,7 +863,7 @@ function Test-MaintenanceConsent {
         $answer = Read-Host 'Proceed with all of the above? [y/N]'
     }
     catch {
-        Write-Warning "Could not read an answer ($($_.Exception.Message)) - re-run with -Yes to confirm this plan."
+        Write-Warning "Could not read an answer ($($_.Exception.Message)) - nothing was changed."
         return $false
     }
     if ([string]::IsNullOrWhiteSpace($answer)) {
@@ -1129,14 +985,13 @@ function Initialize-MicrosoftUpdateService {
 
 function Invoke-WindowsUpdate {
     # Installs software updates, plus Office and other Microsoft products when
-    # the Microsoft Update service is usable. Drivers are left to -DriverUpdate.
+    # the Microsoft Update service is usable. Drivers are left to the driver-update step.
     Initialize-PSWindowsUpdate
 
     # -Install runs scan + download + install in one call; -AcceptAll answers
     # the per-update prompt; -IgnoreReboot suppresses the automatic restart.
-    # -UpdateType Software keeps drivers out of this pass - they are only
-    # installed by the opt-in -DriverUpdate step, so that switch means what it
-    # says. -MicrosoftUpdate adds Office and other Microsoft products.
+    # -UpdateType Software keeps drivers out of this pass - the separate driver
+    # step installs them. -MicrosoftUpdate adds Office and other Microsoft products.
     $updateArgs = @{
         UpdateType   = 'Software'
         AcceptAll    = $true
@@ -1171,7 +1026,7 @@ function Invoke-WindowsUpdate {
 }
 
 # ---------------------------------------------------------------------------
-# Step 2: Driver updates (only with -DriverUpdate)
+# Step 2: Driver updates
 # ---------------------------------------------------------------------------
 
 function Invoke-DriverUpdate {
@@ -1239,8 +1094,7 @@ function Resolve-Winget {
 }
 
 function Test-WslRunning {
-    # True if a WSL distribution is currently running. Upgrading the WSL package
-    # runs "wsl --shutdown", so a WSL upgrade would kill any live session.
+    # True if a WSL distribution is currently running.
     $wsl = Get-Command -Name wsl.exe -CommandType Application -ErrorAction SilentlyContinue |
         Select-Object -First 1
     if (-not $wsl) {
@@ -1298,23 +1152,6 @@ function Test-WingetSupportsExclude {
         return $false
     }
     return (($help -join "`n") -match '--exclude')
-}
-
-function Test-WingetUpgradeAvailable {
-    # True when winget reports a pending upgrade for exactly this package Id.
-    param(
-        [Parameter(Mandatory)] [string] $Winget,
-        [Parameter(Mandatory)] [string] $Id
-    )
-    try {
-        $out = & $Winget list --id $Id --exact --upgrade-available `
-            --disable-interactivity --accept-source-agreements 2>$null
-    }
-    catch {
-        Write-Verbose "Could not query winget for ${Id}: $($_.Exception.Message)"
-        return $false
-    }
-    return ($LASTEXITCODE -eq 0 -and (($out -join "`n") -match [regex]::Escape($Id)))
 }
 
 function Get-WingetIgnoreList {
@@ -1377,46 +1214,18 @@ function Invoke-WingetUpgrade {
     $ignoreFile = Join-Path $PSScriptRoot 'winget_ignore.txt'
     $configIgnoreList = Get-WingetIgnoreList -Path $ignoreFile
 
-    # Hold the WSL package back while a distro is running - upgrading it runs
-    # "wsl --shutdown" and would drop live sessions. Not needed when the
-    # up-front confirmation already approved a WSL shutdown (the default; only
-    # -SkipWslCompact leaves it unapproved).
-    $wslPackageId = 'Microsoft.WSL'
-    $wslUpgradePending = $false
-    if ($script:AllowWslShutdown) {
-        if (Test-WslRunning) {
-            Write-Output "WSL is running and a WSL shutdown was approved for this run - $wslPackageId is not held back."
-        }
-    }
-    else {
-        $wslUpgradePending = (Test-WslRunning) -and (Test-WingetUpgradeAvailable -Winget $winget -Id $wslPackageId)
+    # Upgrading Microsoft.WSL runs "wsl --shutdown"; the up-front confirmation
+    # already covered that, so the package is not held back.
+    if (Test-WslRunning) {
+        Write-Output "WSL is running and a WSL shutdown was approved for this run - Microsoft.WSL is not held back."
     }
 
-    $excludeList = [System.Collections.Generic.List[string]]::new()
-    $excludeList.AddRange([string[]]$configIgnoreList)
-    if ($wslUpgradePending -and -not $excludeList.Contains($wslPackageId)) {
-        $excludeList.Add($wslPackageId)
-    }
-
-    $wslHeldBack = $false
-    if ($excludeList.Count -gt 0) {
+    if ($configIgnoreList.Count -gt 0) {
         if (Test-WingetSupportsExclude -Winget $winget) {
-            foreach ($id in $excludeList) {
+            foreach ($id in $configIgnoreList) {
                 $wingetArgs += @('--exclude', $id)
             }
-            if ($configIgnoreList.Count -gt 0) {
-                Write-Output "Excluding configured package(s) ($ignoreFile): $($configIgnoreList -join ', ')"
-            }
-            if ($wslUpgradePending) {
-                $wslHeldBack = $true
-                Write-Output "WSL is running - excluding $wslPackageId from this upgrade."
-            }
-        }
-        elseif ($wslUpgradePending) {
-            $script:StepStatus = 'SKIP'
-            $script:StepDetail = "held back: WSL is running with a pending $wslPackageId upgrade and this winget build has no --exclude; run 'wsl --shutdown' first or upgrade WSL manually"
-            Write-Warning $script:StepDetail
-            return
+            Write-Output "Excluding configured package(s) ($ignoreFile): $($configIgnoreList -join ', ')"
         }
         else {
             Write-Warning "This winget build has no --exclude; the configured ignore list ($($configIgnoreList -join ', ')) will not be applied this run."
@@ -1424,20 +1233,31 @@ function Invoke-WingetUpgrade {
     }
 
     Write-Output "$winget $($wingetArgs -join ' ')"
-    & $winget @wingetArgs
+    # Tee so the output still shows in the window / transcript while we keep a
+    # copy to count per-package failures from.
+    $wingetOutput = $null
+    & $winget @wingetArgs | Tee-Object -Variable wingetOutput
     $code = $LASTEXITCODE
-
-    $wslNote = if ($wslHeldBack) { "; $wslPackageId held back (WSL running)" } else { '' }
 
     # 0x8A15002B / -1978335189 = APPINSTALLER_CLI_ERROR_UPDATE_NOT_APPLICABLE:
     # there was nothing to upgrade.
     $noApplicableUpgrades = -1978335189
     if ($code -eq 0) {
-        $script:StepDetail = "winget upgrades applied$wslNote"
+        $script:StepDetail = "winget upgrades applied"
         return
     }
     if ($code -eq $noApplicableUpgrades) {
-        $script:StepDetail = "nothing to upgrade$wslNote"
+        $script:StepDetail = "nothing to upgrade"
+        return
+    }
+
+    # winget attempts every package before exiting non-zero, so a failure is
+    # per-package, not the pass as a whole: count the packages whose installer
+    # reported failure and record the step as WARN rather than aborting it.
+    $failedCount = @($wingetOutput | Where-Object { "$_" -match 'installer failed with exit code' }).Count
+    if ($failedCount -gt 0) {
+        $script:StepStatus = 'WARN'
+        $script:StepDetail = "$failedCount package upgrade(s) failed; the rest were attempted"
         return
     }
 
@@ -1693,12 +1513,6 @@ function Invoke-WslCompaction {
     # Compacts each WSL 2 distro's .vhdx with Hyper-V's Optimize-VHD. Every
     # guard below runs BEFORE "wsl --shutdown", so a machine that cannot
     # compact never has WSL shut down for nothing.
-    if (-not $script:AllowWslShutdown) {
-        $script:StepStatus = 'SKIP'
-        $script:StepDetail = 'WSL shutdown was not approved'
-        return
-    }
-
     # Guard: tooling. Optimize-VHD comes from the Hyper-V PowerShell module and
     # talks to the Hyper-V Virtual Machine Management service.
     $wsl = Get-Command -Name wsl.exe -CommandType Application -ErrorAction SilentlyContinue |
@@ -2150,7 +1964,7 @@ function Invoke-DefenderMaintenance {
         $warnings.Add('real-time protection is OFF')
     }
 
-    $scanType = if ($script:DefenderFullScan) { 'FullScan' } else { 'QuickScan' }
+    $scanType = 'FullScan'
     $scanStart = Get-Date
     Write-Output "Start-MpScan -ScanType $scanType (this can take a while) ..."
     Start-MpScan -ScanType $scanType -ErrorAction Stop
@@ -2190,21 +2004,11 @@ function Invoke-DefenderMaintenance {
 # ---------------------------------------------------------------------------
 
 $script:SelfPath = $PSCommandPath
-$script:SagerunProfile = $SagerunProfile
-$script:KeepStepWindows = [bool]$KeepStepWindows
-$script:DefenderFullScan = [bool]$DefenderFullScan
+# Disk Cleanup "sageset/sagerun" profile number (StateFlags<N> registry values
+# and "cleanmgr /sagerun:N"). Fixed; not a parameter.
+$script:SagerunProfile = 100
 
 $script:IsAdmin = Test-Administrator
-
-# Has this run's up-front confirmation covered "wsl --shutdown"? Yes unless
-# -SkipWslCompact (that step is what shuts WSL down) or the admin-only steps
-# will not run at all. A step window is told by the orchestrator.
-if ($RunStep) {
-    $script:AllowWslShutdown = [bool]$AllowWslShutdown
-}
-else {
-    $script:AllowWslShutdown = (-not $SkipWslCompact) -and ($script:IsAdmin -or -not $NoElevate)
-}
 
 # Child mode: this process was launched by the orchestrator to run one step.
 if ($RunStep) {
@@ -2212,37 +2016,30 @@ if ($RunStep) {
         Write-Error '-RunStep requires -RunDir.'
         exit 1
     }
-    Invoke-MaintenanceStep -Step $RunStep -RunDir $RunDir -SagerunProfile $SagerunProfile -KeepOpen:$KeepStepWindows
+    Invoke-MaintenanceStep -Step $RunStep -RunDir $RunDir
     exit 1  # Invoke-MaintenanceStep always exits; this is just a guard.
 }
 
-$adminStepDue = $DriverUpdate -or -not (
-    $SkipWindowsUpdate -and $SkipWinget -and $SkipIntegrity -and $SkipDiskCleanup -and
-    $SkipWslCompact -and $SkipHealthCheck -and $SkipDefrag -and $SkipDefender)
-
 # Up-front plan + consent, before anything (even the UAC prompt) happens. Not
-# repeated on the elevated relaunch - that only happens after this passed.
+# repeated on the elevated relaunch - that only happens after this passed. This
+# is the only prompt in the whole run.
 if (-not $Relaunched) {
-    $plan = Get-MaintenancePlan -AdminStepsWillRun ($script:IsAdmin -or -not $NoElevate)
-    if ($plan.Count -gt 0) {
-        Show-MaintenancePlan -Plan $plan
-        if ($Yes) {
-            Write-Output 'Proceeding without asking (-Yes).'
-        }
-        elseif (-not (Test-MaintenanceConsent)) {
-            Write-Warning 'Cancelled - nothing was changed. Re-run and answer y to proceed (or pass -Yes).'
-            exit 1
-        }
+    $plan = Get-MaintenancePlan
+    Show-MaintenancePlan -Plan $plan
+    if (-not (Test-MaintenanceConsent)) {
+        Write-Warning 'Cancelled - nothing was changed. Re-run and answer y to proceed.'
+        exit 1
     }
 }
 
-# Self-elevate: if an admin-only step (everything except the winget user pass)
-# is going to run and we are not elevated, relaunch the whole script elevated
-# in a new console and mirror its exit code. -NoElevate opts out (the steps are
-# then skipped by the -RequiresAdmin gate in Invoke-Step). Step windows spawned
-# later inherit this elevation - no further UAC prompts.
-if (-not $script:IsAdmin -and $adminStepDue -and -not $NoElevate) {
-    Write-Output 'Windows Update, winget (system), integrity repair, Disk Cleanup, WSL compaction, health check, optimize and Defender need Administrator - relaunching elevated (a UAC prompt will appear)...'
+# Self-elevate: nearly every step needs Administrator, so if we are not elevated
+# relaunch the whole script elevated in a new console and mirror its exit code.
+# Step windows spawned later inherit this elevation - no further UAC prompts.
+# The elevated console closes when it ends, so it writes summary.txt to its run
+# directory and this window echoes it afterwards.
+if (-not $script:IsAdmin) {
+    Write-Output 'Most steps need Administrator - relaunching elevated (a UAC prompt will appear)...'
+    $launchedAt = Get-Date
 
     $childArgs = @(
         '-NoProfile'
@@ -2252,27 +2049,23 @@ if (-not $script:IsAdmin -and $adminStepDue -and -not $NoElevate) {
         (Format-ProcessArgument $PSCommandPath)
         '-Relaunched'
     )
-    foreach ($entry in $PSBoundParameters.GetEnumerator()) {
-        if ($entry.Key -in @('Relaunched', 'NoElevate', 'RunStep', 'RunDir')) {
-            continue
-        }
-        if ($entry.Value -is [System.Management.Automation.SwitchParameter]) {
-            if ($entry.Value.IsPresent) {
-                $childArgs += "-$($entry.Key)"
-            }
-        }
-        else {
-            $childArgs += @("-$($entry.Key)", (Format-ProcessArgument ([string]$entry.Value)))
-        }
-    }
 
     try {
         $child = Start-Process -FilePath $script:HostExe -ArgumentList $childArgs `
             -Verb RunAs -Wait -PassThru -ErrorAction Stop
     }
     catch {
-        Write-Error ("Could not elevate ({0}). Re-run from an elevated prompt, or pass -NoElevate to skip the admin-only steps." -f $_.Exception.Message)
+        Write-Error ("Could not elevate ({0}). Re-run from an elevated prompt." -f $_.Exception.Message)
         exit 1
+    }
+
+    $summaryFile = Get-ChildItem -Path ([System.IO.Path]::GetTempPath()) -Directory -Filter 'windows_maintenance_*' -ErrorAction SilentlyContinue |
+        Where-Object { $_.CreationTime -ge $launchedAt.AddSeconds(-5) } |
+        ForEach-Object { Join-Path $_.FullName 'summary.txt' } |
+        Where-Object { Test-Path -LiteralPath $_ } |
+        Select-Object -First 1
+    if ($summaryFile) {
+        Get-Content -LiteralPath $summaryFile | Write-Output
     }
     exit ([int]$child.ExitCode)
 }
@@ -2282,36 +2075,27 @@ $script:RunDir = Join-Path ([System.IO.Path]::GetTempPath()) ('windows_maintenan
 New-Item -ItemType Directory -Path $script:RunDir -Force | Out-Null
 
 Write-Output "Windows maintenance run - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-Write-Output "Host: $env:COMPUTERNAME   User: $env:USERNAME   Elevated: $script:IsAdmin   Disk Cleanup profile: $SagerunProfile"
+Write-Output "Host: $env:COMPUTERNAME   User: $env:USERNAME   Elevated: $script:IsAdmin   Disk Cleanup profile: $script:SagerunProfile"
 Write-Output "Per-step windows and logs: $script:RunDir"
-if (-not $script:IsAdmin -and $adminStepDue) {
-    Write-Warning '-NoElevate and not elevated - Windows Update, winget (system), integrity repair, Disk Cleanup, WSL compaction, health check, optimize and Defender will be skipped.'
-}
-
 # Preflight (warnings only) and a restore point before anything changes.
 $spaceBefore = Get-FixedVolumeSpace
 Invoke-Preflight -Space $spaceBefore
-$changesSystemFiles = $DriverUpdate -or -not ($SkipWindowsUpdate -and $SkipIntegrity -and $SkipDiskCleanup)
-if ($script:IsAdmin -and $changesSystemFiles -and -not $SkipRestorePoint) {
-    Invoke-RestorePoint
-}
+Invoke-RestorePoint
 
 # Order matters: repair the component store before cleaning it, compact WSL
 # disks before the optimize step so the freed space gets retrimmed, and health-
 # check the disks before the optimize step so it can skip a failing one.
 $plannedSteps = [System.Collections.Generic.List[hashtable]]::new()
-$plannedSteps.Add(@{ Name = 'Windows Update'; Step = 'WindowsUpdate'; Skip = [bool]$SkipWindowsUpdate; RequiresAdmin = $true })
-if ($DriverUpdate) {
-    $plannedSteps.Add(@{ Name = 'Driver updates (Windows Update)'; Step = 'DriverUpdate'; RequiresAdmin = $true })
-}
-$plannedSteps.Add(@{ Name = 'winget upgrade (user)'; Step = 'Winget'; Skip = [bool]$SkipWinget; Unelevated = $true })
-$plannedSteps.Add(@{ Name = 'winget upgrade (system)'; Step = 'WingetSystem'; Skip = [bool]$SkipWinget; RequiresAdmin = $true })
-$plannedSteps.Add(@{ Name = 'System file integrity (DISM + SFC)'; Step = 'Integrity'; Skip = [bool]$SkipIntegrity; RequiresAdmin = $true })
-$plannedSteps.Add(@{ Name = 'Disk Cleanup + WinSxS'; Step = 'DiskCleanup'; Skip = [bool]$SkipDiskCleanup; RequiresAdmin = $true })
-$plannedSteps.Add(@{ Name = 'WSL disk compaction'; Step = 'WslCompact'; Skip = [bool]$SkipWslCompact; RequiresAdmin = $true })
-$plannedSteps.Add(@{ Name = 'Health check (disks, event log)'; Step = 'HealthCheck'; Skip = [bool]$SkipHealthCheck; RequiresAdmin = $true })
-$plannedSteps.Add(@{ Name = 'Optimize / defrag volumes'; Step = 'Defrag'; Skip = [bool]$SkipDefrag; RequiresAdmin = $true })
-$plannedSteps.Add(@{ Name = 'Defender update + scan'; Step = 'Defender'; Skip = [bool]$SkipDefender; RequiresAdmin = $true })
+$plannedSteps.Add(@{ Name = 'Windows Update'; Step = 'WindowsUpdate' })
+$plannedSteps.Add(@{ Name = 'Driver updates (Windows Update)'; Step = 'DriverUpdate' })
+$plannedSteps.Add(@{ Name = 'winget upgrade (user)'; Step = 'Winget'; Unelevated = $true })
+$plannedSteps.Add(@{ Name = 'winget upgrade (system)'; Step = 'WingetSystem' })
+$plannedSteps.Add(@{ Name = 'System file integrity (DISM + SFC)'; Step = 'Integrity' })
+$plannedSteps.Add(@{ Name = 'Disk Cleanup + WinSxS'; Step = 'DiskCleanup' })
+$plannedSteps.Add(@{ Name = 'WSL disk compaction'; Step = 'WslCompact' })
+$plannedSteps.Add(@{ Name = 'Health check (disks, event log)'; Step = 'HealthCheck' })
+$plannedSteps.Add(@{ Name = 'Optimize / defrag volumes'; Step = 'Defrag' })
+$plannedSteps.Add(@{ Name = 'Defender update + scan'; Step = 'Defender' })
 
 $script:StepCount = $plannedSteps.Count
 foreach ($plannedStep in $plannedSteps) {
@@ -2321,6 +2105,17 @@ foreach ($plannedStep in $plannedSteps) {
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
+
+# Mirror the summary to summary.txt so the un-elevated launcher window can
+# echo it after this (elevated, auto-closing) console is gone.
+$summaryTranscript = $false
+try {
+    Start-Transcript -LiteralPath (Join-Path $script:RunDir 'summary.txt') -Force | Out-Null
+    $summaryTranscript = $true
+}
+catch {
+    Write-Verbose "Summary transcript unavailable: $($_.Exception.Message)"
+}
 
 $span = (Get-Date) - $overallStart
 Write-Output ''
@@ -2364,11 +2159,6 @@ if ($failedSteps.Count -gt 0) {
     $exitCode = 1
 }
 
-if ($script:SkippedForAdmin) {
-    Write-Warning 'Admin-only steps were skipped (-NoElevate, not elevated) - re-run elevated to include them.'
-    $exitCode = 1
-}
-
 # WARN never fails the run, but do not let a finding scroll past unnoticed.
 $warnSteps = @($script:Results | Where-Object { $_.Status -eq 'WARN' })
 if ($warnSteps.Count -gt 0) {
@@ -2377,24 +2167,26 @@ if ($warnSteps.Count -gt 0) {
 
 if ($exitCode -eq 0) {
     if ($warnSteps.Count -gt 0) {
-        Write-Output 'All requested maintenance steps completed (with warnings).'
+        Write-Output 'All maintenance steps completed (with warnings).'
     }
     else {
-        Write-Output 'All requested maintenance steps completed successfully.'
+        Write-Output 'All maintenance steps completed successfully.'
     }
 }
 
-# Elevated relaunch runs in its own console; hold it open so the summary above
-# stays readable after the script ends. Best-effort - skip if the host has no
-# interactive input.
-if ($Relaunched -and [Environment]::UserInteractive) {
+if ($summaryTranscript) {
     try {
-        Write-Output ''
-        [void](Read-Host 'Elevated run complete - press Enter to close this window')
+        Stop-Transcript | Out-Null
     }
     catch {
-        Write-Verbose "Could not pause for input: $($_.Exception.Message)"
+        Write-Verbose "Stop-Transcript: $($_.Exception.Message)"
     }
+}
+
+# Never wait for a keypress; when this is the elevated relaunch, linger briefly
+# before its console closes.
+if ($Relaunched) {
+    Start-Sleep -Seconds 5
 }
 
 exit $exitCode
