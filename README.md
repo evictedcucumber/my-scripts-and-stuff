@@ -163,9 +163,15 @@ STAR_LIST="Other List" ./scripts/git/sync_archive_forks/sync_archive_forks.sh
   are no longer used and can be deleted.
 
 Star lists are only exposed through the GraphQL API (`viewer.lists`), so the
-list is read with `gh api graphql`, not `gh repo list`. The
-[SSH / hardware key note](#ssh--hardware-key-yubikey-note) above applies here
-too.
+list is read with `gh api graphql`, not `gh repo list`.
+
+All git operations (clone, fetch, `ls-remote`) go over HTTPS authenticated with
+`gh`'s token, so no SSH key, passphrase or hardware-key touch is needed — even if
+`gh`'s `git_protocol` is `ssh` or existing clones have SSH remotes. For the
+duration of the run only, the script sets `GIT_CONFIG_*` env vars that rewrite
+`git@github.com:` / `ssh://git@github.com/` URLs to `https://github.com/` and
+use `gh auth git-credential` as the sole credential helper for `github.com`;
+your global git/gh config and the clones' saved remote URLs are left unchanged.
 
 Requires: `nix`, and `gh` authenticated (and allowed to push to and create
 releases on your forks).

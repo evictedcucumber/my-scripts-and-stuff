@@ -53,6 +53,9 @@
 #                 with matching versions, features and profile settings are
 #                 compiled once (default: ~/.cache/archive-forks/target).
 #
+# All git traffic to GitHub goes over HTTPS using gh's token (SSH remotes are
+# rewritten for the run), so no SSH key or passphrase is needed.
+#
 # Requirements: nix (flakes are enabled per-invocation) and an authenticated gh
 # login. Everything else - gh, git, jq, cargo (with the x86_64-pc-windows-msvc
 # std), cargo-zigbuild, zig, cargo-xwin, clang/lld/llvm - comes from the
@@ -206,6 +209,26 @@ if ! gh auth status >/dev/null 2>&1; then
   echo "Error: gh is not authenticated. Run 'gh auth login' first." >&2
   exit 1
 fi
+
+# Route every git operation on GitHub through HTTPS with gh's token, so no SSH
+# key (passphrase, hardware-key PIN/touch) is needed even if gh's git_protocol
+# is ssh or existing clones have SSH remotes. Set via GIT_CONFIG_* env vars, so
+# it applies to this run only (including the git that `gh repo clone` runs) and
+# neither global config nor the clones' saved remote URLs change. The empty
+# helper clears any other credential helpers for github.com first.
+GIT_ENV_CONFIG=(
+  'url.https://github.com/.insteadOf=git@github.com:'
+  'url.https://github.com/.insteadOf=ssh://git@github.com/'
+  'credential.https://github.com.helper='
+  'credential.https://github.com.helper=!gh auth git-credential'
+)
+git_config_idx="${GIT_CONFIG_COUNT:-0}"
+for entry in "${GIT_ENV_CONFIG[@]}"; do
+  export "GIT_CONFIG_KEY_$git_config_idx=${entry%%=*}"
+  export "GIT_CONFIG_VALUE_$git_config_idx=${entry#*=}"
+  git_config_idx=$((git_config_idx + 1))
+done
+export GIT_CONFIG_COUNT="$git_config_idx"
 
 # Releases are only created on repos this user owns (their forks), never on
 # anyone else's repo in the list.
