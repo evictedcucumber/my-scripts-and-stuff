@@ -1212,7 +1212,7 @@ function Invoke-WingetUpgrade {
     }
 
     $ignoreFile = Join-Path $PSScriptRoot 'winget_ignore.txt'
-    $configIgnoreList = Get-WingetIgnoreList -Path $ignoreFile
+    $configIgnoreList = @(Get-WingetIgnoreList -Path $ignoreFile)
 
     # Upgrading Microsoft.WSL runs "wsl --shutdown"; the up-front confirmation
     # already covered that, so the package is not held back.
