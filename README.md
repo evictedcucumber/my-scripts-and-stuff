@@ -105,6 +105,11 @@ a slow or failing build never holds up the syncing.
      `x86_64-unknown-linux-gnu`, pinned to glibc 2.35 like upstream's
      Ubuntu 22.04 release builds. A plain `cargo build` on NixOS would set the
      ELF interpreter to `/nix/store/...`, so the binary would only run on NixOS.
+     Builds set `CFLAGS_x86_64_unknown_linux_gnu="-fno-function-sections
+     -fno-data-sections"`: the `cc` crate's default `-ffunction-sections
+     -fdata-sections` makes zig's clang emit section symbols with an undefined
+     section index, and lld then fails with empty `undefined symbol:` errors
+     (seen with `aws-lc-sys`).
    - `<name>-windows-x86_64.exe`: `cargo xwin build` for
      `x86_64-pc-windows-msvc` (MSVC, like upstream). The MSVC CRT/SDK is
      downloaded into `~/.cache/cargo-xwin` on first use.
@@ -155,7 +160,8 @@ beside it and re-execs itself inside that flake's devShell
 (`nix develop path:<script dir> --command ...`), which provides `gh`, `git`,
 `jq`, a Rust toolchain with the `x86_64-pc-windows-msvc` std (from
 [rust-overlay](https://github.com/oxalica/rust-overlay)), `cargo-zigbuild`,
-`zig`, `cargo-xwin` and clang/lld/llvm. So it runs from any directory — no
+`zig`, `cargo-xwin`, clang/lld/llvm, and `pkg-config` + `alsa-lib` (for
+`alsa-sys`, which needs `pkg-config --libs --cflags alsa`). So it runs from any directory — no
 direnv or `nix develop` needed — as long as `flake.nix`/`flake.lock` stay next
 to it; symlinking the script (e.g. into `~/bin`) works too. The first run
 builds the environment; later runs reuse it from the Nix store.

@@ -40,8 +40,11 @@
           llvmPackages.clang-unwrapped
           llvmPackages.lld
           llvmPackages.llvm
+          pkg-config
           rust
           zig
+          # alsa-sys (filmcraft, deckcraft) finds libasound via pkg-config.
+          alsa-lib.dev
         ];
       };
     });

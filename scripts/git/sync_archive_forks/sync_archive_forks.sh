@@ -464,7 +464,13 @@ for entry in "${SYNCED[@]}"; do
     continue
   fi
 
-  if ! build_target "$dest" "$name" linux-x86_64 x86_64-unknown-linux-gnu "" \
+  # -fno-{function,data}-sections: the cc crate adds -ffunction-sections
+  # -fdata-sections by default, and zig's clang then emits section symbols with
+  # st_shndx=UND (e.g. aws-lc-sys's obj.o), which lld reports as "undefined
+  # symbol:" with an empty name when linking. Appended after the defaults, so
+  # it wins. Linux-only; the xwin (clang-cl) builds are unaffected.
+  if ! CFLAGS_x86_64_unknown_linux_gnu="-fno-function-sections -fno-data-sections" \
+    build_target "$dest" "$name" linux-x86_64 x86_64-unknown-linux-gnu "" \
     zigbuild --target x86_64-unknown-linux-gnu.2.35; then
     echo "WARNING: Linux build of $repo failed" >&2
     FAILED+=("$repo (build: linux-x86_64)")
