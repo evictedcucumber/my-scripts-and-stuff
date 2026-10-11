@@ -11,7 +11,9 @@ scripts/
     archive_directory.ps1   # max-compression 7z of a directory into ~/Downloads/YYYY-MM-DD.7z
   git/
     github_backup.sh     # backs up all repos for a GitHub owner into a 7z archive
-    sync_archive_forks.sh   # clones/syncs every repo in a GitHub star list (forks synced to upstream on GitHub + locally), then cross-builds each main binary for Linux/Windows
+    sync_archive_forks/
+      flake.nix               # the script's own runtime env; the script re-execs itself in its devShell
+      sync_archive_forks.sh   # clones/syncs every repo in a GitHub star list (forks synced to upstream on GitHub + locally), then cross-builds each main binary for Linux/Windows
   maintenance/
     windows_maintenance.ps1   # Windows Update + winget + DISM/SFC + Disk Cleanup + WSL disk compaction + health check + defrag + Defender + driver updates; no options - confirms once up front then runs unattended, each step in its own window, self-elevates via UAC
   nix/
@@ -40,6 +42,11 @@ scripts depend on (`gh`, `git`, `jq`, `lefthook`, `p7zip`, `powershell`, `shellc
 
 - Add a script's runtime dependencies to `devShells.default.packages` in
   [flake.nix](flake.nix) when introducing a new tool.
+- Exception: a script with a heavy or self-contained toolchain lives in its own
+  `scripts/<category>/<name>/` directory with a `flake.nix` + `flake.lock`
+  beside it, and re-execs itself inside that flake's devShell (guarded by an
+  env var) so it runs from anywhere without direnv — see
+  `sync_archive_forks.sh`. Its deps go in that flake, not the root one.
 - The devShell's `shellHook` runs `lefthook install`, wiring up the git hooks
   defined in [lefthook.yml](lefthook.yml) automatically on `cd` (via direnv).
   Those hooks run `shellcheck -x` on staged `*.sh` files and

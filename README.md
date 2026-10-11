@@ -83,7 +83,7 @@ whole run. In this user's setup that config is managed via home-manager in the
 `nixos-config` repo (`home/modules/tools/ssh.nix`), not here — `~/.ssh/config` is a
 generated symlink into the Nix store and shouldn't be edited directly.
 
-## scripts/git/sync_archive_forks.sh
+## scripts/git/sync_archive_forks/sync_archive_forks.sh
 
 Reads a GitHub star list (default **Archive Forks**) for the `gh`-authenticated
 user and keeps every repo in it mirrored locally. It runs in two phases: steps
@@ -126,10 +126,10 @@ reported as failed rather than overwritten. Each failed step (sync, clone,
 each build target) is listed at the end and the script **exits 1**.
 
 ```bash
-./scripts/git/sync_archive_forks.sh                      # sync + build
-./scripts/git/sync_archive_forks.sh --no-build           # sync only
-./scripts/git/sync_archive_forks.sh ~/archive            # custom source destination
-STAR_LIST="Other List" ./scripts/git/sync_archive_forks.sh
+./scripts/git/sync_archive_forks/sync_archive_forks.sh              # sync + build
+./scripts/git/sync_archive_forks/sync_archive_forks.sh --no-build   # sync only
+./scripts/git/sync_archive_forks/sync_archive_forks.sh ~/archive    # custom source destination
+STAR_LIST="Other List" ./scripts/git/sync_archive_forks/sync_archive_forks.sh
 ```
 
 - `DEST_DIR` (optional positional) — where repos are cloned; default
@@ -149,12 +149,16 @@ list is read with `gh api graphql`, not `gh repo list`. The
 [SSH / hardware key note](#ssh--hardware-key-yubikey-note) above applies here
 too.
 
-Requires: `gh` (authenticated, and allowed to push to your forks), `git`, `jq`;
-for building, a Rust toolchain with the `x86_64-pc-windows-msvc` std,
-`cargo-zigbuild`, `zig`, `cargo-xwin` and clang/lld/llvm. This repo's devShell
-provides all of them (Rust comes from
-[rust-overlay](https://github.com/oxalica/rust-overlay)), so run it from
-inside `nix develop` / direnv.
+Requires: `nix`, and `gh` authenticated (and allowed to push to your forks).
+The script has its own [flake.nix](scripts/git/sync_archive_forks/flake.nix)
+beside it and re-execs itself inside that flake's devShell
+(`nix develop path:<script dir> --command ...`), which provides `gh`, `git`,
+`jq`, a Rust toolchain with the `x86_64-pc-windows-msvc` std (from
+[rust-overlay](https://github.com/oxalica/rust-overlay)), `cargo-zigbuild`,
+`zig`, `cargo-xwin` and clang/lld/llvm. So it runs from any directory — no
+direnv or `nix develop` needed — as long as `flake.nix`/`flake.lock` stay next
+to it; symlinking the script (e.g. into `~/bin`) works too. The first run
+builds the environment; later runs reuse it from the Nix store.
 
 ## scripts/maintenance/windows_maintenance.ps1
 

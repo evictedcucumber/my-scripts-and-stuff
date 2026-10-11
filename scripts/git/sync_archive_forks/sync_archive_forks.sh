@@ -45,11 +45,16 @@
 #                 with matching versions, features and profile settings are
 #                 compiled once (default: ~/.cache/archive-forks/target).
 #
-# Requirements: gh (authenticated), git, jq; for building also cargo (with the
-# x86_64-pc-windows-msvc std installed), cargo-zigbuild, zig, cargo-xwin and
-# clang/lld/llvm. The repo's flake devShell provides all of them.
+# Requirements: nix (flakes are enabled per-invocation) and an authenticated gh
+# login. Everything else - gh, git, jq, cargo (with the x86_64-pc-windows-msvc
+# std), cargo-zigbuild, zig, cargo-xwin, clang/lld/llvm - comes from the
+# flake.nix next to this script: the script re-execs itself inside that flake's
+# devShell (`nix develop`), so it runs from any directory without direnv.
 #
 set -euo pipefail
+
+# Kept for the re-exec into the devShell below, before parsing consumes them.
+ORIG_ARGS=("$@")
 
 # ---------------------------------------------------------------------------
 # Arguments
@@ -122,6 +127,33 @@ if [[ $# -gt 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Enter the devShell
+#
+# Re-exec this script inside the devShell of the flake.nix beside it (symlinks
+# resolved, so a link in ~/bin works). `path:` copies only this directory into
+# the store rather than the enclosing git repo, and doesn't need the flake files
+# committed. SYNC_ARCHIVE_FORKS_IN_NIX stops the re-exec'd copy looping.
+# ---------------------------------------------------------------------------
+
+if [[ "${SYNC_ARCHIVE_FORKS_IN_NIX:-}" != 1 ]]; then
+  if ! command -v nix >/dev/null 2>&1; then
+    echo "Error: required command 'nix' not found in PATH." >&2
+    exit 1
+  fi
+
+  SCRIPT_PATH="$(realpath -- "${BASH_SOURCE[0]}")"
+  SCRIPT_DIR="$(dirname -- "$SCRIPT_PATH")"
+  if [[ ! -f "$SCRIPT_DIR/flake.nix" ]]; then
+    echo "Error: no flake.nix next to the script in $SCRIPT_DIR." >&2
+    exit 1
+  fi
+
+  export SYNC_ARCHIVE_FORKS_IN_NIX=1
+  exec nix --extra-experimental-features 'nix-command flakes' \
+    develop "path:$SCRIPT_DIR" --command "$SCRIPT_PATH" "${ORIG_ARGS[@]}"
+fi
+
+# ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
@@ -144,7 +176,7 @@ fi
 
 for cmd in "${REQUIRED_CMDS[@]}"; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
-    echo "Error: required command '$cmd' not found in PATH (run inside this repo's 'nix develop' shell)." >&2
+    echo "Error: required command '$cmd' not found in PATH (should come from the devShell of the flake.nix next to this script)." >&2
     exit 1
   fi
 done
