@@ -83,6 +83,70 @@ whole run. In this user's setup that config is managed via home-manager in the
 `nixos-config` repo (`home/modules/tools/ssh.nix`), not here — `~/.ssh/config` is a
 generated symlink into the Nix store and shouldn't be edited directly.
 
+## scripts/git/sync_archive_forks.sh
+
+Reads a GitHub star list (default **Archive Forks**) for the `gh`-authenticated
+user and keeps every repo in it mirrored locally. For each repo:
+
+1. **Forks** — syncs the fork's copy of the upstream default branch on GitHub
+   from its parent (`gh repo sync <fork> --branch <upstream default>`),
+   fast-forward only.
+2. Clones it into `DEST_DIR/<name>` if missing (`gh repo clone`, which also adds
+   an `upstream` remote for forks); otherwise `git fetch --all --prune --tags`.
+3. Fast-forwards the local copy of that branch to `origin/<branch>` — via
+   `git merge --ff-only` when it is checked out, otherwise by updating the ref
+   without touching the working tree.
+4. **Builds** the repo's main binary (the package and bin named after the repo,
+   e.g. `apps/photocraft`) in release mode and copies it into
+   `BUILD_DIR/<name>/` (default `~/builds/archive-forks/<name>/`):
+   - `<name>-linux-x86_64`: `cargo zigbuild` for
+     `x86_64-unknown-linux-gnu`, pinned to glibc 2.35 like upstream's
+     Ubuntu 22.04 release builds. A plain `cargo build` on NixOS would set the
+     ELF interpreter to `/nix/store/...`, so the binary would only run on NixOS.
+   - `<name>-windows-x86_64.exe`: `cargo xwin build` for
+     `x86_64-pc-windows-msvc` (MSVC, like upstream). The MSVC CRT/SDK is
+     downloaded into `~/.cache/cargo-xwin` on first use.
+   - macOS: **skipped**. It can't be cross-built from Linux without Apple's
+     SDK, and upstream builds it on macOS runners.
+
+   Builds run from the working tree, so a clone that isn't on the default
+   branch is reported and not built. Binaries are copied, not moved, so
+   cargo's cache stays valid and an unchanged repo rebuilds almost instantly.
+
+Non-fork repos in the list are just cloned/fetched and fast-forwarded on their
+default branch. A fork whose branch has diverged from upstream, a fork that is
+archived (read-only) on GitHub, or a local clone with diverged commits is
+reported as failed rather than overwritten. Each failed step (sync, clone,
+each build target) is listed at the end and the script **exits 1**.
+
+```bash
+./scripts/git/sync_archive_forks.sh                      # sync + build
+./scripts/git/sync_archive_forks.sh --no-build           # sync only
+./scripts/git/sync_archive_forks.sh ~/archive            # custom source destination
+STAR_LIST="Other List" ./scripts/git/sync_archive_forks.sh
+```
+
+- `DEST_DIR` (optional positional) — where repos are cloned; default
+  `~/repos/archive-forks`, created if missing.
+- `-f, --force` — hard-reset instead of fast-forwarding, on GitHub
+  (`gh repo sync --force`) and locally (`git reset --hard` / forced ref update).
+  **Discards** fork commits that upstream does not have.
+- `--no-build` — sync only; skip step 4.
+- `STAR_LIST` — env var; the star list name to read (exact match).
+- `BUILD_DIR` — env var; where binaries go (default `~/builds/archive-forks`).
+
+Star lists are only exposed through the GraphQL API (`viewer.lists`), so the
+list is read with `gh api graphql`, not `gh repo list`. The
+[SSH / hardware key note](#ssh--hardware-key-yubikey-note) above applies here
+too.
+
+Requires: `gh` (authenticated, and allowed to push to your forks), `git`, `jq`;
+for building, a Rust toolchain with the `x86_64-pc-windows-msvc` std,
+`cargo-zigbuild`, `zig`, `cargo-xwin` and clang/lld/llvm. This repo's devShell
+provides all of them (Rust comes from
+[rust-overlay](https://github.com/oxalica/rust-overlay)), so run it from
+inside `nix develop` / direnv.
+
 ## scripts/maintenance/windows_maintenance.ps1
 
 Windows-side helper (not run from WSL/bash) that runs a batch of maintenance
