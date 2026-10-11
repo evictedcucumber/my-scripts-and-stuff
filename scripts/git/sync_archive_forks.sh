@@ -3,7 +3,8 @@
 # sync_archive_forks.sh
 #
 # Reads a GitHub star list (default "Archive Forks") for the authenticated gh
-# user, then for every repo in it:
+# user. It first syncs every repo in it (steps 1-3), then builds every repo that
+# synced cleanly (step 4):
 #   1. if it is a fork, syncs the fork's copy of the upstream default branch
 #      on GitHub from its parent (`gh repo sync`, fast-forward only unless
 #      --force);
@@ -327,6 +328,14 @@ SYNC_ARGS=()
 
 FAILED=()
 
+# "repo<TAB>name<TAB>dest<TAB>branch" for each repo that synced cleanly; the
+# build phase only builds these.
+SYNCED=()
+
+# ---------------------------------------------------------------------------
+# Phase 1: clone and sync every repo
+# ---------------------------------------------------------------------------
+
 for item in "${ITEMS[@]}"; do
   IFS=$'\t' read -r repo is_fork is_archived branch parent <<< "$item"
   name="${repo#*/}"
@@ -380,10 +389,27 @@ for item in "${ITEMS[@]}"; do
   fi
 
   echo "Up to date: $dest ($branch)"
+  SYNCED+=("$repo"$'\t'"$name"$'\t'"$dest"$'\t'"$branch")
+done
 
-  # 4. Build. The working tree is what gets built, so it must be on $branch.
-  [[ "$BUILD" == true ]] || continue
+# ---------------------------------------------------------------------------
+# Phase 2: build every synced repo and copy its binaries to BUILD_DIR
+# ---------------------------------------------------------------------------
 
+if [[ "$BUILD" == true && ${#SYNCED[@]} -gt 0 ]]; then
+  echo
+  echo "Synced ${#SYNCED[@]} of ${#ITEMS[@]} repo(s); building..."
+fi
+
+for entry in "${SYNCED[@]}"; do
+  [[ "$BUILD" == true ]] || break
+
+  IFS=$'\t' read -r repo name dest branch <<< "$entry"
+
+  echo
+  echo "==== build $repo ===="
+
+  # The working tree is what gets built, so it must be on $branch.
   if [[ "$(git -C "$dest" symbolic-ref --quiet --short HEAD || true)" != "$branch" ]]; then
     echo "WARNING: $dest is not on $branch; not building it." >&2
     FAILED+=("$repo (build: working tree not on $branch)")

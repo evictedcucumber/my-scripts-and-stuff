@@ -86,7 +86,9 @@ generated symlink into the Nix store and shouldn't be edited directly.
 ## scripts/git/sync_archive_forks.sh
 
 Reads a GitHub star list (default **Archive Forks**) for the `gh`-authenticated
-user and keeps every repo in it mirrored locally. For each repo:
+user and keeps every repo in it mirrored locally. It runs in two phases: steps
+1–3 for **every** repo first, then step 4 for each repo that synced cleanly, so
+a slow or failing build never holds up the syncing.
 
 1. **Forks** — syncs the fork's copy of the upstream default branch on GitHub
    from its parent (`gh repo sync <fork> --branch <upstream default>`),
