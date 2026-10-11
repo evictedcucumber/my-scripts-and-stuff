@@ -40,6 +40,10 @@
 # Environment:
 #   STAR_LIST     Name of the star list to read (default: "Archive Forks").
 #   BUILD_DIR     Where binaries are copied (default: ~/builds/archive-forks).
+#   CARGO_TARGET_DIR
+#                 Cargo target dir shared by every repo, so dependencies built
+#                 with matching versions, features and profile settings are
+#                 compiled once (default: ~/.cache/archive-forks/target).
 #
 # Requirements: gh (authenticated), git, jq; for building also cargo (with the
 # x86_64-pc-windows-msvc std installed), cargo-zigbuild, zig, cargo-xwin and
@@ -72,6 +76,8 @@ Options:
 Environment:
   STAR_LIST     Star list to read (default: "Archive Forks").
   BUILD_DIR     Where binaries go (default: ~/builds/archive-forks).
+  CARGO_TARGET_DIR
+                Shared cargo target dir (default: ~/.cache/archive-forks/target).
 
 Exits 1 if any repo failed.
 EOF
@@ -122,6 +128,10 @@ fi
 STAR_LIST="${STAR_LIST:-Archive Forks}"
 DEST_DIR="${1:-$HOME/repos/archive-forks}"
 BUILD_DIR="${BUILD_DIR:-$HOME/builds/archive-forks}"
+# One target dir for all repos: they share most of their dependency tree, and
+# cargo reuses any artifact whose versions/features/profile match. Each repo
+# keeps its own release profile; repos with different profiles just don't share.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/archive-forks/target}"
 
 # ---------------------------------------------------------------------------
 # Sanity checks
@@ -156,6 +166,13 @@ if [[ "$BUILD" == true ]]; then
   BUILD_DIR="$(cd -- "$BUILD_DIR" && pwd)"
   if [[ ! -w "$BUILD_DIR" ]]; then
     echo "Error: build directory is not writable: $BUILD_DIR" >&2
+    exit 1
+  fi
+
+  mkdir -p -- "$CARGO_TARGET_DIR"
+  CARGO_TARGET_DIR="$(cd -- "$CARGO_TARGET_DIR" && pwd)"
+  if [[ ! -w "$CARGO_TARGET_DIR" ]]; then
+    echo "Error: cargo target directory is not writable: $CARGO_TARGET_DIR" >&2
     exit 1
   fi
 fi
@@ -307,8 +324,7 @@ build_target() {
     cargo "$@" --release --locked -p "$name" --bin "$name" || exit 1
   ) || return 1
 
-  local target_root="${CARGO_TARGET_DIR:-$dir/target}"
-  local out="$target_root/$triple/release/$name$suffix"
+  local out="$CARGO_TARGET_DIR/$triple/release/$name$suffix"
   if [[ ! -f "$out" ]]; then
     echo "Error: build succeeded but $out is missing." >&2
     return 1

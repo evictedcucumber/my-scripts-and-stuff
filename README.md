@@ -114,6 +114,10 @@ a slow or failing build never holds up the syncing.
    Builds run from the working tree, so a clone that isn't on the default
    branch is reported and not built. Binaries are copied, not moved, so
    cargo's cache stays valid and an unchanged repo rebuilds almost instantly.
+   All repos build into one shared `CARGO_TARGET_DIR`, so dependencies they
+   have in common (same version, features and release profile) compile once.
+   Each repo keeps its own release profile, so binaries are optimised as
+   upstream intends; repos with different profiles just share less.
 
 Non-fork repos in the list are just cloned/fetched and fast-forwarded on their
 default branch. A fork whose branch has diverged from upstream, a fork that is
@@ -136,6 +140,9 @@ STAR_LIST="Other List" ./scripts/git/sync_archive_forks.sh
 - `--no-build` — sync only; skip step 4.
 - `STAR_LIST` — env var; the star list name to read (exact match).
 - `BUILD_DIR` — env var; where binaries go (default `~/builds/archive-forks`).
+- `CARGO_TARGET_DIR` — env var; cargo target dir shared by all repos (default
+  `~/.cache/archive-forks/target`). Per-repo `target/` dirs from earlier runs
+  are no longer used and can be deleted.
 
 Star lists are only exposed through the GraphQL API (`viewer.lists`), so the
 list is read with `gh api graphql`, not `gh repo list`. The
