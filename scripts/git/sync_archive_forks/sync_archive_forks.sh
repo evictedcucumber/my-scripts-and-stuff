@@ -4,7 +4,7 @@
 #
 # Reads a GitHub star list (default "Archive Forks") for the authenticated gh
 # user. It first syncs every repo in it (steps 1-3), then builds every repo that
-# synced cleanly (step 4):
+# synced cleanly (step 4), then publishes those builds as releases (step 5):
 #   1. if it is a fork, syncs the fork's copy of the upstream default branch
 #      on GitHub from its parent (`gh repo sync`, fast-forward only unless
 #      --force);
@@ -19,13 +19,20 @@
 #                                   its interpreter into /nix/store)
 #        <name>-windows-x86_64.exe  cargo xwin, x86_64-pc-windows-msvc
 #      macOS is skipped: it can't be cross-built from Linux without Apple's SDK.
+#   5. if the repo is owned by the authenticated user (i.e. your fork, never
+#      the upstream parent) and both targets built, creates a GitHub release
+#      on it with both binaries attached, tagged with the binary's version
+#      (`cargo metadata`): v<version>, or v<version>-v2, -v3, ... when that
+#      version is already released (or tagged at another commit). Skipped if
+#      a release of that version already points at the built commit.
 #
 # Non-fork repos in the list are just cloned/fetched and fast-forwarded on their
 # default branch. Failures are collected per repo (and per build target) and
 # summarised at the end; the script exits 1 if anything failed.
 #
 # Usage:
-#   sync_archive_forks.sh [-f|--force] [--no-build] [-h|--help] [DEST_DIR]
+#   sync_archive_forks.sh [-f|--force] [--no-build] [--no-release] [-h|--help]
+#                         [DEST_DIR]
 #
 # Arguments:
 #   DEST_DIR      Where repos are cloned (default: ~/repos/archive-forks).
@@ -35,7 +42,8 @@
 #   -f, --force   Hard-reset instead of fast-forwarding, both on GitHub
 #                 (`gh repo sync --force`) and locally (`git reset --hard`).
 #                 Discards any commits on the fork's branch that upstream lacks.
-#   --no-build    Only sync; skip step 4.
+#   --no-build    Only sync; skip steps 4 and 5.
+#   --no-release  Sync and build; skip step 5.
 #
 # Environment:
 #   STAR_LIST     Name of the star list to read (default: "Archive Forks").
@@ -62,11 +70,14 @@ ORIG_ARGS=("$@")
 
 usage() {
   cat <<'EOF'
-Usage: sync_archive_forks.sh [-f|--force] [--no-build] [-h|--help] [DEST_DIR]
+Usage: sync_archive_forks.sh [-f|--force] [--no-build] [--no-release] [-h|--help]
+                             [DEST_DIR]
 
 Clone/sync every repo in a GitHub star list into DEST_DIR, syncing forks to
 their upstream default branch on GitHub first, then release-build each repo's
-main binary for Linux and Windows into BUILD_DIR/<name>/ (macOS is skipped).
+main binary for Linux and Windows into BUILD_DIR/<name>/ (macOS is skipped),
+then publish them as a GitHub release (v<version>, or v<version>-vN if that
+version is already released) on each repo you own.
 
 Arguments:
   DEST_DIR      Where repos are cloned (default: ~/repos/archive-forks).
@@ -75,7 +86,9 @@ Options:
   -f, --force   Hard-reset (GitHub and local) instead of fast-forward only.
                 Discards fork commits that upstream does not have.
       --no-build
-                Only sync; don't build.
+                Only sync; don't build or release.
+      --no-release
+                Sync and build; don't create releases.
   -h, --help    Show this help.
 
 Environment:
@@ -90,6 +103,7 @@ EOF
 
 FORCE=false
 BUILD=true
+RELEASE=true
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -103,6 +117,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-build)
       BUILD=false
+      shift
+      ;;
+    --no-release)
+      RELEASE=false
       shift
       ;;
     --)
@@ -119,6 +137,9 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# Releases publish the builds, so there is nothing to release without them.
+[[ "$BUILD" == true ]] || RELEASE=false
 
 if [[ $# -gt 1 ]]; then
   echo "Error: unexpected argument: $2 (only one DEST_DIR is accepted)." >&2
@@ -184,6 +205,15 @@ done
 if ! gh auth status >/dev/null 2>&1; then
   echo "Error: gh is not authenticated. Run 'gh auth login' first." >&2
   exit 1
+fi
+
+# Releases are only created on repos this user owns (their forks), never on
+# anyone else's repo in the list.
+if [[ "$RELEASE" == true ]]; then
+  if ! GH_USER="$(gh api user --jq .login)" || [[ -z "$GH_USER" ]]; then
+    echo "Error: failed to look up the authenticated GitHub user." >&2
+    exit 1
+  fi
 fi
 
 mkdir -p -- "$DEST_DIR"
@@ -368,6 +398,98 @@ build_target() {
 }
 
 # ---------------------------------------------------------------------------
+# Publish a repo's built binaries as a GitHub release on REPO.
+#
+#   release_repo REPO NAME DIR BRANCH
+#
+# The tag is v<version> of package NAME (from `cargo metadata`); if REPO already
+# has a release with that tag, or the tag exists on GitHub at another commit
+# (e.g. inherited from upstream), it tries v<version>-v2, -v3, ... A tag that
+# already exists at the built commit without a release is reused. Nothing is
+# created if a release of this version already points at the built commit.
+# Returns 1 on failure, with an explanation on stderr.
+# ---------------------------------------------------------------------------
+
+release_repo() {
+  local repo="$1" name="$2" dir="$3" branch="$4"
+
+  local version
+  version="$(
+    cd -- "$dir" &&
+      cargo metadata --no-deps --format-version 1 --locked |
+      jq -r --arg name "$name" \
+        '[.packages[] | select(.name == $name)][0].version // empty'
+  )" || return 1
+  if [[ -z "$version" ]]; then
+    echo "Error: no package '$name' in the cargo metadata of $dir." >&2
+    return 1
+  fi
+
+  # The release targets a commit on GitHub, so what was built must be exactly
+  # origin/$branch (not local commits ahead of it).
+  local sha
+  sha="$(git -C "$dir" rev-parse HEAD)" || return 1
+  if [[ "$sha" != "$(git -C "$dir" rev-parse "origin/$branch")" ]]; then
+    echo "Error: $dir HEAD differs from origin/$branch; not releasing an unpushed build." >&2
+    return 1
+  fi
+
+  # Existing release tags, and every tag on GitHub with the commit it points
+  # at ("<sha> <tag>"; the peeled ^{} line of an annotated tag comes last and
+  # wins below).
+  local releases_txt tags_txt
+  releases_txt="$(gh release list -R "$repo" --limit 1000 --json tagName --jq '.[].tagName')" || return 1
+  tags_txt="$(git -C "$dir" ls-remote --tags origin)" || return 1
+
+  local -A released=() tag_sha=()
+  local line t s
+  while IFS= read -r t; do
+    [[ -n "$t" ]] || continue
+    released["$t"]=1
+  done <<< "$releases_txt"
+  while IFS=$'\t' read -r s line; do
+    [[ -n "$line" ]] || continue
+    t="${line#refs/tags/}"
+    tag_sha["${t%^\{\}}"]="$s"
+  done <<< "$tags_txt"
+
+  local base="v$version" tag n=1
+  while true; do
+    tag="$base"
+    if ((n > 1)); then
+      tag="$base-v$n"
+    fi
+
+    if [[ -n "${released[$tag]:-}" ]]; then
+      if [[ "${tag_sha[$tag]:-}" == "$sha" ]]; then
+        echo "Already released: $repo $tag ($sha)"
+        return 0
+      fi
+    elif [[ -z "${tag_sha[$tag]:-}" || "${tag_sha[$tag]}" == "$sha" ]]; then
+      break
+    fi
+    ((n++))
+  done
+
+  local assets=(
+    "$BUILD_DIR/$name/$name-linux-x86_64"
+    "$BUILD_DIR/$name/$name-windows-x86_64.exe"
+  )
+
+  echo "Creating release $tag on $repo at $sha..."
+  gh release create "$tag" "${assets[@]}" \
+    -R "$repo" \
+    --target "$sha" \
+    --title "$name $tag" \
+    --notes "Automated build of \`$name\` $version from $branch@$sha.
+
+- \`$name-linux-x86_64\`: x86_64-unknown-linux-gnu, glibc 2.35
+- \`$name-windows-x86_64.exe\`: x86_64-pc-windows-msvc" || return 1
+
+  echo "Released: https://github.com/$repo/releases/tag/$tag"
+}
+
+# ---------------------------------------------------------------------------
 # Sync repos
 # ---------------------------------------------------------------------------
 
@@ -379,6 +501,10 @@ FAILED=()
 # "repo<TAB>name<TAB>dest<TAB>branch" for each repo that synced cleanly; the
 # build phase only builds these.
 SYNCED=()
+
+# The SYNCED entries whose Linux and Windows builds both succeeded; only these
+# are released.
+BUILT=()
 
 # ---------------------------------------------------------------------------
 # Phase 1: clone and sync every repo
@@ -469,17 +595,49 @@ for entry in "${SYNCED[@]}"; do
   # st_shndx=UND (e.g. aws-lc-sys's obj.o), which lld reports as "undefined
   # symbol:" with an empty name when linking. Appended after the defaults, so
   # it wins. Linux-only; the xwin (clang-cl) builds are unaffected.
+  built=true
+
   if ! CFLAGS_x86_64_unknown_linux_gnu="-fno-function-sections -fno-data-sections" \
     build_target "$dest" "$name" linux-x86_64 x86_64-unknown-linux-gnu "" \
     zigbuild --target x86_64-unknown-linux-gnu.2.35; then
     echo "WARNING: Linux build of $repo failed" >&2
     FAILED+=("$repo (build: linux-x86_64)")
+    built=false
   fi
 
   if ! build_target "$dest" "$name" windows-x86_64 x86_64-pc-windows-msvc .exe \
     xwin build --target x86_64-pc-windows-msvc; then
     echo "WARNING: Windows build of $repo failed" >&2
     FAILED+=("$repo (build: windows-x86_64)")
+    built=false
+  fi
+
+  if [[ "$built" == true ]]; then
+    BUILT+=("$entry")
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# Phase 3: release every fully built repo the user owns
+# ---------------------------------------------------------------------------
+
+for entry in "${BUILT[@]}"; do
+  [[ "$RELEASE" == true ]] || break
+
+  IFS=$'\t' read -r repo name dest branch <<< "$entry"
+
+  if [[ "${repo%%/*}" != "$GH_USER" ]]; then
+    echo
+    echo "Not releasing $repo: owned by ${repo%%/*}, not $GH_USER."
+    continue
+  fi
+
+  echo
+  echo "==== release $repo ===="
+
+  if ! release_repo "$repo" "$name" "$dest" "$branch"; then
+    echo "WARNING: failed to release $repo" >&2
+    FAILED+=("$repo (release)")
   fi
 done
 

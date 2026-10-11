@@ -86,9 +86,10 @@ generated symlink into the Nix store and shouldn't be edited directly.
 ## scripts/git/sync_archive_forks/sync_archive_forks.sh
 
 Reads a GitHub star list (default **Archive Forks**) for the `gh`-authenticated
-user and keeps every repo in it mirrored locally. It runs in two phases: steps
-1–3 for **every** repo first, then step 4 for each repo that synced cleanly, so
-a slow or failing build never holds up the syncing.
+user and keeps every repo in it mirrored locally. It runs in phases: steps 1–3
+for **every** repo first, then step 4 for each repo that synced cleanly, then
+step 5 for each repo that built cleanly, so a slow or failing build never holds
+up the syncing.
 
 1. **Forks** — syncs the fork's copy of the upstream default branch on GitHub
    from its parent (`gh repo sync <fork> --branch <upstream default>`),
@@ -123,6 +124,16 @@ a slow or failing build never holds up the syncing.
    have in common (same version, features and release profile) compile once.
    Each repo keeps its own release profile, so binaries are optimised as
    upstream intends; repos with different profiles just share less.
+5. **Releases** both binaries on GitHub (`gh release create`) — only on repos
+   owned by the `gh` user (your forks; never the upstream parent or anyone
+   else's repo in the list), and only when both the Linux and Windows builds
+   succeeded. The tag is the binary's version from `cargo metadata`:
+   `v<version>`, or `v<version>-v2`, `-v3`, ... if your repo already has a
+   release with that tag, or has the tag at another commit (forks inherit
+   upstream's tags). A tag already at the built commit with no release is
+   reused. The release targets the built commit (`origin/<branch>`); if a
+   release of that version already points at it, nothing is created, so
+   re-running on unchanged code doesn't pile up `-vN` releases.
 
 Non-fork repos in the list are just cloned/fetched and fast-forwarded on their
 default branch. A fork whose branch has diverged from upstream, a fork that is
@@ -133,6 +144,7 @@ each build target) is listed at the end and the script **exits 1**.
 ```bash
 ./scripts/git/sync_archive_forks/sync_archive_forks.sh              # sync + build
 ./scripts/git/sync_archive_forks/sync_archive_forks.sh --no-build   # sync only
+./scripts/git/sync_archive_forks/sync_archive_forks.sh --no-release # sync + build, no releases
 ./scripts/git/sync_archive_forks/sync_archive_forks.sh ~/archive    # custom source destination
 STAR_LIST="Other List" ./scripts/git/sync_archive_forks/sync_archive_forks.sh
 ```
@@ -142,7 +154,8 @@ STAR_LIST="Other List" ./scripts/git/sync_archive_forks/sync_archive_forks.sh
 - `-f, --force` — hard-reset instead of fast-forwarding, on GitHub
   (`gh repo sync --force`) and locally (`git reset --hard` / forced ref update).
   **Discards** fork commits that upstream does not have.
-- `--no-build` — sync only; skip step 4.
+- `--no-build` — sync only; skip steps 4 and 5.
+- `--no-release` — sync and build; skip step 5.
 - `STAR_LIST` — env var; the star list name to read (exact match).
 - `BUILD_DIR` — env var; where binaries go (default `~/builds/archive-forks`).
 - `CARGO_TARGET_DIR` — env var; cargo target dir shared by all repos (default
@@ -154,7 +167,8 @@ list is read with `gh api graphql`, not `gh repo list`. The
 [SSH / hardware key note](#ssh--hardware-key-yubikey-note) above applies here
 too.
 
-Requires: `nix`, and `gh` authenticated (and allowed to push to your forks).
+Requires: `nix`, and `gh` authenticated (and allowed to push to and create
+releases on your forks).
 The script has its own [flake.nix](scripts/git/sync_archive_forks/flake.nix)
 beside it and re-execs itself inside that flake's devShell
 (`nix develop path:<script dir> --command ...`), which provides `gh`, `git`,
