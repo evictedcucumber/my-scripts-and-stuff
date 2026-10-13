@@ -5,10 +5,12 @@ on:
     branches: [main]
     paths:
       - "scripts/**/*.ps1"
+      - "configs/**/*.ps1"
       - ".github/workflows/psscriptanalyzer.yml"
   pull_request:
     paths:
       - "scripts/**/*.ps1"
+      - "configs/**/*.ps1"
       - ".github/workflows/psscriptanalyzer.yml"
   workflow_dispatch:
 
@@ -25,7 +27,7 @@ jobs:
         shell: pwsh
         run: |
           Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser -Repository PSGallery
-          $results = Invoke-ScriptAnalyzer -Path scripts -Recurse -Severity Warning,Error
+          $results = 'scripts', 'configs' | ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Recurse -Severity Warning,Error }
           $results | Format-Table -AutoSize
           if ($results) {
             exit 1

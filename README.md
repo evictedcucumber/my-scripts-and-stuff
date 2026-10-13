@@ -480,3 +480,40 @@ Requires: Windows PowerShell 5.1+, Windows Task Scheduler (`ScheduledTasks`
 module, built in), run from an elevated PowerShell prompt. Expects `attach_yubikey.ps1` to already be deployed
 at `%USERPROFILE%\Documents\Scripts\attach_yubikey.ps1` — copy it there before
 running this script.
+
+## configs/windows_sandbox/windows_sandbox.wsb
+
+A Windows Sandbox config. At logon it runs `sandbox_setup.ps1`, which sits beside
+it in the same folder, to give a fresh sandbox:
+
+- **Dark mode**: sets `AppsUseLightTheme` / `SystemUsesLightTheme` to 0, then
+  restarts Explorer so the taskbar and Start update.
+- **winget**: Microsoft's documented sandbox method. It installs the
+  `Microsoft.WinGet.Client` module from PSGallery, then runs
+  `Repair-WinGetPackageManager -AllUsers`.
+- **Microsoft Store**: runs ThioJoe's
+  [`Install-Microsoft-Store.ps1`](https://github.com/ThioJoe/Windows-Sandbox-Tools),
+  pinned to a commit and checked against a SHA256 in the config section of
+  `sandbox_setup.ps1`. It downloads the Store and its dependencies from
+  Microsoft's Windows Update delivery service, installs them with
+  `Add-AppxPackage`, and sets the region to US, which the Store needs.
+
+Each step that fails is reported and skipped, and the others still run. Output
+is logged to `sandbox_setup.log` on the sandbox desktop. Setup takes a few
+minutes after the desktop appears, and it re-runs on every launch, since the
+sandbox is discarded when closed.
+
+The `.wsb` maps its own folder into the sandbox read-only from
+`%USERPROFILE%\Downloads\windows_sandbox`, so the folder has to be there on
+the Windows host. Copy it from WSL, then double-click `windows_sandbox.wsb`:
+
+```bash
+./scripts/wsl/copy_to_downloads.sh --force configs/windows_sandbox
+```
+
+If your Downloads folder is redirected somewhere else, edit `<HostFolder>` in
+the `.wsb` to match.
+
+Requires: Windows 11 23H2+ (for the environment variable in `<HostFolder>`)
+with the Windows Sandbox feature enabled. The sandbox needs network access,
+which is on by default.

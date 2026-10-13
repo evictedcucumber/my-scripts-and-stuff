@@ -6,6 +6,10 @@ by category under `scripts/`.
 ## Layout
 
 ```
+configs/
+  windows_sandbox/
+    windows_sandbox.wsb   # Windows Sandbox config; maps this folder in (from ~/Downloads on the host) and runs sandbox_setup.ps1 at logon
+    sandbox_setup.ps1     # runs inside the sandbox: dark mode + winget + Microsoft Store
 scripts/
   archive/
     archive_directory.ps1   # max-compression 7z of a directory into ~/Downloads/YYYY-MM-DD.7z
@@ -29,6 +33,11 @@ for Windows-only scripts, e.g. WSL/usbipd helpers that must run on the Windows
 side). Each script should be runnable directly (`./scripts/<category>/name.sh`),
 self-contained, and list its own requirements in a header comment — there is no
 shared lib/framework here.
+
+Things that aren't standalone scripts (config files for other tools, plus any
+helper scripts that only make sense alongside them) go in `configs/<name>/`
+instead. Any `.ps1`/`.sh` in there still follows the standards below and is
+linted the same way.
 
 Per-script usage, config, and requirements live in [README.md](README.md), not
 here — add a section there for every new script. This file covers conventions

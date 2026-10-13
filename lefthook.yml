@@ -5,7 +5,7 @@ pre-commit:
       glob: "scripts/**/*.sh"
       run: shellcheck -x {staged_files}
     psscriptanalyzer:
-      glob: "scripts/**/*.ps1"
+      glob: "{scripts,configs}/**/*.ps1"
       run: |
         pwsh -NoProfile -NonInteractive -Command '& {
           if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {

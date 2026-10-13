@@ -18,7 +18,7 @@ deviation is fixed or a new rule is added.
 | Nix devShell ([flake.nix](../../flake.nix)) | on `cd` via direnv | Provides the tools; `lefthook install` wires the hooks |
 
 Everything else in the standards is currently enforced by review only. CI runs on
-`scripts/**` paths only, so a change limited to `docs/` triggers no checks.
+`scripts/**` (and `configs/**/*.ps1` for PSScriptAnalyzer) paths only, so a change limited to `docs/` triggers no checks.
 
 ## Rules with no automated enforcement
 
@@ -61,8 +61,8 @@ Listed in rough order of value for effort. Each would be its own change.
 6. **`.shellcheckrc`** with `external-sources=true` (so `-x` need not be repeated on
    every command line) and any optional checks worth enabling. Per `SH-50`,
    findings are still suppressed inline, never in this file.
-7. **CI path filters**: both workflows trigger only on `scripts/**` and their own
-   workflow file. If items 3 or 4 add a config file or a conformance script, add it
+7. **CI path filters**: both workflows trigger only on `scripts/**` (plus
+   `configs/**/*.ps1` for PSScriptAnalyzer) and their own workflow file. If items 3 or 4 add a config file or a conformance script, add it
    to the `paths:` lists so a change to it re-runs the checks.
 
 ## Deviations fixed

@@ -1,0 +1,27 @@
+<Configuration>
+  <!--
+    windows_sandbox.wsb
+
+    Windows Sandbox with dark mode, winget and the Microsoft Store set up at logon
+    by sandbox_setup.ps1 (see that script for details). Setup takes a few minutes
+    after the desktop appears, and its log is written to the sandbox desktop.
+
+    This folder must be at %USERPROFILE%\Downloads\windows_sandbox on the Windows
+    host, because it is mapped into the sandbox read-only. From WSL:
+      ./scripts/wsl/copy_to_downloads.sh configs/windows_sandbox
+    Then double-click windows_sandbox.wsb.
+
+    Requirements: Windows 11 23H2+ with the Windows Sandbox feature enabled
+    (23H2+ for the environment variable in HostFolder).
+  -->
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>%USERPROFILE%\Downloads\windows_sandbox</HostFolder>
+      <SandboxFolder>C:\sandbox_setup</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\sandbox_setup\sandbox_setup.ps1</Command>
+  </LogonCommand>
+</Configuration>
