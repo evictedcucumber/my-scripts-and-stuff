@@ -1,4 +1,4 @@
-# personal-scripts
+# my-scripts-and-stuff
 
 A collection of standalone shell (and occasionally PowerShell) scripts, organized
 by category under `scripts/`.

@@ -1,4 +1,4 @@
-# scripts
+# my-scripts-and-stuff
 
 A repository with all my scripts. See [CLAUDE.md](CLAUDE.md) for repo layout and
 conventions for writing/maintaining scripts. This file documents what each script
