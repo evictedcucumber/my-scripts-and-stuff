@@ -439,26 +439,31 @@ update_local() {
 #
 #   craft_fonts_ref DIR
 #
-# Recognises both forms used in .github/workflows/release.yml: a
+# Recognises the forms used in .github/workflows/release.yml: a
 # `craft-fonts-ref: <sha>` input to the shared release workflow, and a
-# `ref: <sha>` in the same step as `repository: storytold/craft-fonts`.
-# Prints nothing if the repo doesn't use craft-fonts.
+# `ref: <sha>` in the same step as `repository: storytold/craft-fonts`. Either
+# value may also be `${{ env.NAME }}`, resolved from the workflow's own
+# `NAME: <sha>` entry. Prints nothing if the repo doesn't use craft-fonts;
+# returns 1 (with an error) if it does but the ref can't be resolved.
 # ---------------------------------------------------------------------------
 
 craft_fonts_ref() {
   local workflow="$1/.github/workflows/release.yml"
   [[ -f "$workflow" ]] || return 0
 
-  local input_re='^[[:space:]]*craft-fonts-ref:[[:space:]]*([^[:space:]#]+)'
+  local value_re='[[:space:]]*(.*[^[:space:]])'
+  local input_re="^[[:space:]]*craft-fonts-ref:$value_re"
   local repo_re="repository:[[:space:]]*$CRAFT_FONTS_REPO([[:space:]#]|\$)"
-  local ref_re='^[[:space:]]*ref:[[:space:]]*([^[:space:]#]+)'
+  local ref_re="^[[:space:]]*ref:$value_re"
   local step_re='^[[:space:]]*-[[:space:]]'
-  local line in_fonts_step=false
+  local line ref="" in_fonts_step=false
+  local lines=()
+  mapfile -t lines < "$workflow"
 
-  while IFS= read -r line; do
+  for line in "${lines[@]}"; do
     if [[ "$line" =~ $input_re ]]; then
-      echo "${BASH_REMATCH[1]}"
-      return 0
+      ref="${BASH_REMATCH[1]}"
+      break
     fi
     # A new step (`- uses:`/`- name:`) ends the craft-fonts checkout step.
     if [[ "$line" =~ $step_re ]]; then
@@ -467,10 +472,42 @@ craft_fonts_ref() {
     if [[ "$line" =~ $repo_re ]]; then
       in_fonts_step=true
     elif [[ "$in_fonts_step" == true && "$line" =~ $ref_re ]]; then
-      echo "${BASH_REMATCH[1]}"
-      return 0
+      ref="${BASH_REMATCH[1]}"
+      break
     fi
-  done < "$workflow"
+  done
+  [[ -n "$ref" ]] || return 0
+
+  # Drop a trailing comment and optional quotes.
+  ref="${ref%%[[:space:]]#*}"
+  ref="${ref#\"}"
+  ref="${ref%\"}"
+  ref="${ref#\'}"
+  ref="${ref%\'}"
+
+  # ${{ env.NAME }}: the workflow-level (or job/step) `NAME: value` entry.
+  local env_re='^\$\{\{[[:space:]]*env\.([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*\}\}$'
+  if [[ "$ref" =~ $env_re ]]; then
+    local var="${BASH_REMATCH[1]}" var_re resolved=""
+    var_re='^[[:space:]]*'"$var"$':[[:space:]]*["\']?([^[:space:]"\'#]+)'
+    for line in "${lines[@]}"; do
+      if [[ "$line" =~ $var_re ]]; then
+        resolved="${BASH_REMATCH[1]}"
+        break
+      fi
+    done
+    if [[ -z "$resolved" ]]; then
+      echo "Error: $workflow uses craft-fonts ref $ref, but defines no $var." >&2
+      return 1
+    fi
+    ref="$resolved"
+  fi
+
+  if [[ "$ref" == *"\${{"* || "$ref" =~ [[:space:]] ]]; then
+    echo "Error: can't resolve craft-fonts ref '$ref' in $workflow." >&2
+    return 1
+  fi
+  echo "$ref"
 }
 
 # ---------------------------------------------------------------------------
@@ -793,7 +830,11 @@ for entry in "${SYNCED[@]}"; do
   # Embed craft-fonts at the commit upstream releases with, or build without it
   # (unset, so nothing leaks over from the previous repo).
   unset CRAFT_FONTS_DIR CRAFT_FONTS_REQUIRED
-  fonts_ref="$(craft_fonts_ref "$dest")"
+  if ! fonts_ref="$(craft_fonts_ref "$dest")"; then
+    echo "WARNING: can't tell which $CRAFT_FONTS_REPO commit $repo releases with; not building it." >&2
+    FAILED+=("$repo (build: craft-fonts ref)")
+    continue
+  fi
   if [[ -n "$fonts_ref" ]]; then
     if ! prepare_craft_fonts "$fonts_ref"; then
       echo "WARNING: failed to check out $CRAFT_FONTS_REPO@$fonts_ref; not building $repo." >&2
