@@ -95,7 +95,9 @@ up the syncing.
    from its parent (`gh repo sync <fork> --branch <upstream default>`),
    fast-forward only.
 2. Clones it into `DEST_DIR/<name>` if missing (`gh repo clone`, which also adds
-   an `upstream` remote for forks); otherwise `git fetch --all --prune --tags`.
+   an `upstream` remote for forks); otherwise `git fetch --all --prune`, then
+   `git fetch --tags --force origin` (your fork's tags win locally over a
+   same-named upstream tag at another commit).
 3. Fast-forwards the local copy of that branch to `origin/<branch>` — via
    `git merge --ff-only` when it is checked out, otherwise by updating the ref
    without touching the working tree.
@@ -129,8 +131,8 @@ up the syncing.
    else's repo in the list), and only when both the Linux and Windows builds
    succeeded. The tag is the binary's version from `cargo metadata`:
    `v<version>`, or `v<version>-v2`, `-v3`, ... if your repo already has a
-   release with that tag, or has the tag at another commit (forks inherit
-   upstream's tags). A tag already at the built commit with no release is
+   release with that tag, or it or its upstream parent has the tag at another
+   commit (so a release never reuses an upstream tag name for different code). A tag already at the built commit with no release is
    reused. The release targets the built commit (`origin/<branch>`); if a
    release of that version already points at it, nothing is created, so
    re-running on unchanged code doesn't pile up `-vN` releases.

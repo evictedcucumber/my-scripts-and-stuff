@@ -367,7 +367,13 @@ update_local() {
   (
     cd -- "$dir" || exit 1
 
-    git fetch --all --prune --tags || exit 1
+    # Branches from every remote, then tags from origin only. Fork releases
+    # can reuse a tag name upstream already has at another commit, and both
+    # land in the one refs/tags namespace, so a plain `--all --tags` fetch
+    # rejects the clash ("would clobber existing tag"). --force makes the
+    # fork's tag win locally; tags are not pruned, so upstream-only ones stay.
+    git fetch --all --prune || exit 1
+    git fetch --tags --force origin || exit 1
 
     local current
     current="$(git symbolic-ref --quiet --short HEAD || true)"
@@ -457,14 +463,20 @@ release_repo() {
     return 1
   fi
 
-  # Existing release tags, and every tag on GitHub with the commit it points
-  # at ("<sha> <tag>"; the peeled ^{} line of an annotated tag comes last and
-  # wins below).
-  local releases_txt tags_txt
+  # Existing release tags, and every tag on GitHub (the fork's, and its
+  # parent's if it has an upstream remote) with the commit it points at
+  # ("<sha> <tag>"; the peeled ^{} line of an annotated tag comes last and wins
+  # below). Upstream's tags never reach the fork via `gh repo sync`, but a
+  # release reusing one of their names at another commit would be misleading
+  # and clash in local clones' refs/tags.
+  local releases_txt tags_txt upstream_tags_txt=""
   releases_txt="$(gh release list -R "$repo" --limit 1000 --json tagName --jq '.[].tagName')" || return 1
   tags_txt="$(git -C "$dir" ls-remote --tags origin)" || return 1
+  if git -C "$dir" remote get-url upstream >/dev/null 2>&1; then
+    upstream_tags_txt="$(git -C "$dir" ls-remote --tags upstream)" || return 1
+  fi
 
-  local -A released=() tag_sha=()
+  local -A released=() tag_sha=() upstream_tag_sha=()
   local line t s
   while IFS= read -r t; do
     [[ -n "$t" ]] || continue
@@ -475,6 +487,11 @@ release_repo() {
     t="${line#refs/tags/}"
     tag_sha["${t%^\{\}}"]="$s"
   done <<< "$tags_txt"
+  while IFS=$'\t' read -r s line; do
+    [[ -n "$line" ]] || continue
+    t="${line#refs/tags/}"
+    upstream_tag_sha["${t%^\{\}}"]="$s"
+  done <<< "$upstream_tags_txt"
 
   local base="v$version" tag n=1
   while true; do
@@ -488,7 +505,8 @@ release_repo() {
         echo "Already released: $repo $tag ($sha)"
         return 0
       fi
-    elif [[ -z "${tag_sha[$tag]:-}" || "${tag_sha[$tag]}" == "$sha" ]]; then
+    elif [[ -z "${tag_sha[$tag]:-}" || "${tag_sha[$tag]}" == "$sha" ]] &&
+      [[ -z "${upstream_tag_sha[$tag]:-}" || "${upstream_tag_sha[$tag]}" == "$sha" ]]; then
       break
     fi
     ((n++))
