@@ -3,9 +3,11 @@
     Sets up a fresh Windows Sandbox: dark mode, winget, and the Microsoft Store.
 
 .DESCRIPTION
-    Run automatically at logon by windows_sandbox.wsb (from the read-only mapped
-    folder C:\sandbox_setup). Do not run it on a real machine: it changes the
-    current user's theme and region and installs system packages.
+    Run automatically at logon by windows_sandbox.wsb, which embeds this script
+    (gzipped and base64-encoded) and writes it to %TEMP% in the sandbox before
+    running it. After editing this script, run build_wsb.sh to regenerate the
+    .wsb. Do not run it on a real machine: it changes the current user's theme
+    and region and installs system packages.
 
     Steps, in order. A failing step is reported and skipped, and the rest still
     run:
@@ -25,8 +27,7 @@
     The output is also logged to the desktop as sandbox_setup.log.
 
 .NOTES
-    Requirements: Windows Sandbox (Windows 11 23H2+, for the environment
-    variable in the .wsb HostFolder path), Windows PowerShell 5.1, and network
+    Requirements: Windows Sandbox (Windows 11), Windows PowerShell 5.1, and network
     access (on by default in the sandbox) to the PowerShell Gallery, GitHub and
     Microsoft's update CDN. Runs as the sandbox's WDAGUtilityAccount, which is
     an administrator.

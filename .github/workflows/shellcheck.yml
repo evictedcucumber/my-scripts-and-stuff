@@ -5,10 +5,12 @@ on:
     branches: [main]
     paths:
       - "scripts/**/*.sh"
+      - "configs/**/*.sh"
       - ".github/workflows/shellcheck.yml"
   pull_request:
     paths:
       - "scripts/**/*.sh"
+      - "configs/**/*.sh"
       - ".github/workflows/shellcheck.yml"
   workflow_dispatch:
 
@@ -24,4 +26,4 @@ jobs:
       - name: Run shellcheck
         # find/xargs rather than scripts/**/*.sh: the runner's bash has
         # globstar off, so ** would only match one directory level.
-        run: find scripts -type f -name '*.sh' -print0 | xargs -0 -r shellcheck -x
+        run: find scripts configs -type f -name '*.sh' -print0 | xargs -0 -r shellcheck -x

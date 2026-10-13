@@ -2,8 +2,12 @@ pre-commit:
   parallel: true
   commands:
     shellcheck:
-      glob: "scripts/**/*.sh"
+      glob: "{scripts,configs}/**/*.sh"
       run: shellcheck -x {staged_files}
+    windows-sandbox-wsb:
+      # windows_sandbox.wsb embeds sandbox_setup.ps1; fail if it wasn't regenerated.
+      glob: "configs/windows_sandbox/*"
+      run: ./configs/windows_sandbox/build_wsb.sh --check
     psscriptanalyzer:
       glob: "{scripts,configs}/**/*.ps1"
       run: |

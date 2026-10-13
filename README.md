@@ -483,8 +483,8 @@ running this script.
 
 ## configs/windows_sandbox/windows_sandbox.wsb
 
-A Windows Sandbox config. At logon it runs `sandbox_setup.ps1`, which sits beside
-it in the same folder, to give a fresh sandbox:
+A Windows Sandbox config. At logon it runs `sandbox_setup.ps1` to give a fresh
+sandbox:
 
 - **Dark mode**: sets `AppsUseLightTheme` / `SystemUsesLightTheme` to 0, then
   restarts Explorer so the taskbar and Start update.
@@ -503,17 +503,25 @@ is logged to `sandbox_setup.log` on the sandbox desktop. Setup takes a few
 minutes after the desktop appears, and it re-runs on every launch, since the
 sandbox is discarded when closed.
 
-The `.wsb` maps its own folder into the sandbox read-only from
-`%USERPROFILE%\Downloads\windows_sandbox`, so the folder has to be there on
-the Windows host. Copy it from WSL, then double-click `windows_sandbox.wsb`:
+The `.wsb` is self-contained: `sandbox_setup.ps1` is embedded in its
+`<LogonCommand>` (gzipped and base64-encoded), and decoded into `%TEMP%` inside
+the sandbox at logon. Nothing is mapped in from the host, because Windows
+Sandbox doesn't support relative `<HostFolder>` paths. Copy just the `.wsb` to
+anywhere on the Windows host and double-click it:
 
 ```bash
-./scripts/wsl/copy_to_downloads.sh --force configs/windows_sandbox
+./scripts/wsl/copy_to_downloads.sh --force configs/windows_sandbox/windows_sandbox.wsb
 ```
 
-If your Downloads folder is redirected somewhere else, edit `<HostFolder>` in
-the `.wsb` to match.
+The `.wsb` is generated, so don't edit it by hand. Edit `sandbox_setup.ps1`,
+then regenerate the `.wsb` and commit both files:
 
-Requires: Windows 11 23H2+ (for the environment variable in `<HostFolder>`)
-with the Windows Sandbox feature enabled. The sandbox needs network access,
-which is on by default.
+```bash
+./configs/windows_sandbox/build_wsb.sh
+```
+
+`build_wsb.sh --check` fails if the `.wsb` is out of date. The pre-commit hook
+and CI both run it.
+
+Requires: Windows 11 with the Windows Sandbox feature enabled. The sandbox
+needs network access, which is on by default.

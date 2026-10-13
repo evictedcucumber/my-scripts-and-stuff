@@ -1,0 +1,25 @@
+name: windows-sandbox-wsb
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "configs/windows_sandbox/**"
+      - ".github/workflows/windows_sandbox_wsb.yml"
+  pull_request:
+    paths:
+      - "configs/windows_sandbox/**"
+      - ".github/workflows/windows_sandbox_wsb.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check windows_sandbox.wsb is up to date with sandbox_setup.ps1
+        run: ./configs/windows_sandbox/build_wsb.sh --check
