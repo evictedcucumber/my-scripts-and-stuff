@@ -129,17 +129,15 @@ up the syncing.
 5. **Releases** both binaries on GitHub (`gh release create`) — only on repos
    owned by the `gh` user (your forks; never the upstream parent or anyone
    else's repo in the list), and only when both the Linux and Windows builds
-   succeeded. The tag is the binary's version from `cargo metadata`:
-   `v<version>`, or `v<version>-forked` if the upstream parent already has
-   `v<version>` at another commit (so a release never reuses an upstream tag
-   name for different code); `-v2`, `-v3`, ... is appended if that tag is
-   still taken at another commit. A tag already at the built commit with no
-   release is reused. The release targets the built commit
-   (`origin/<branch>`). If your repo already has a release under that tag (or
-   the newest `<tag>-vN`), it is **updated in place**
-   rather than a new one created: its tag is moved to the built commit and its
-   binaries and notes are replaced (`gh release upload --clobber`). If it
-   already points at the built commit, nothing is done.
+   succeeded. The tag is always `v<version>-forked`, from the binary's
+   version in `cargo metadata`. The suffix means a fork release never clashes
+   with (or is mistaken for) upstream's own `v<version>` tag, and each version
+   has exactly one release that later runs can update. The release targets
+   the built commit (`origin/<branch>`). If your repo already has that
+   release, it is **updated in place** rather than a new one created: its tag
+   is moved to the built commit and its binaries and notes are replaced
+   (`gh release upload --clobber`). If it already points at the built commit,
+   nothing is done.
 
 Non-fork repos in the list are just cloned/fetched and fast-forwarded on their
 default branch. A fork whose branch has diverged from upstream, a fork that is

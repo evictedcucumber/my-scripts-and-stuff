@@ -21,13 +21,11 @@
 #      macOS is skipped: it can't be cross-built from Linux without Apple's SDK.
 #   5. if the repo is owned by the authenticated user (i.e. your fork, never
 #      the upstream parent) and both targets built, creates a GitHub release
-#      on it with both binaries attached, tagged with the binary's version
-#      (`cargo metadata`): v<version>, or v<version>-forked when upstream
-#      already has that tag at another commit (-v2, -v3, ... appended if the
-#      tag is still taken at another commit). If a release under that tag
-#      already exists, it is updated in place instead (tag moved to the built
-#      commit, assets and notes replaced); skipped if it already points at the
-#      built commit.
+#      on it with both binaries attached, tagged v<version>-forked from the
+#      binary's version (`cargo metadata`), so it never clashes with
+#      upstream's own v<version> tag. If that release already exists, it is
+#      updated in place instead (tag moved to the built commit, assets and
+#      notes replaced); skipped if it already points at the built commit.
 #
 # Non-fork repos in the list are just cloned/fetched and fast-forwarded on their
 # default branch. Failures are collected per repo (and per build target) and
@@ -82,9 +80,8 @@ Usage: sync_archive_forks.sh [-f|--force] [--no-build] [--no-release] [-h|--help
 Clone/sync every repo in a GitHub star list into DEST_DIR, syncing forks to
 their upstream default branch on GitHub first, then release-build each repo's
 main binary for Linux and Windows into BUILD_DIR/<name>/ (macOS is skipped),
-then publish them as a GitHub release (v<version>, or v<version>-forked if
-upstream already has that tag; an existing release of that version is updated
-in place) on each repo you own.
+then publish them as a GitHub release (v<version>-forked; an existing release
+of that version is updated in place) on each repo you own.
 
 Arguments:
   DEST_DIR      Where repos are cloned (default: ~/repos/archive-forks).
@@ -371,7 +368,8 @@ update_local() {
   (
     cd -- "$dir" || exit 1
 
-    # Branches from every remote, then tags from origin only. Fork releases
+    # Branches from every remote, then tags from origin only. Fork tags (e.g.
+    # releases from older versions of this script, before the -forked suffix)
     # can reuse a tag name upstream already has at another commit, and both
     # land in the one refs/tags namespace, so a plain `--all --tags` fetch
     # rejects the clash ("would clobber existing tag"). --force makes the
@@ -435,14 +433,13 @@ build_target() {
 #
 #   release_repo REPO NAME DIR BRANCH
 #
-# The tag is v<version> of package NAME (from `cargo metadata`), or
-# v<version>-forked if upstream already has v<version> at another commit. If
-# REPO already has a release under that tag (or the newest <tag>-vN), it is
-# updated in place: its tag is moved to the built commit and its assets and
-# notes replaced (nothing is done if it already points there). Otherwise a new
-# release is created under that tag, or <tag>-v2, -v3, ... if it exists on
-# GitHub at another commit; a tag already at the built commit without a release
-# is reused.
+# The tag is always v<version>-forked, <version> being package NAME's version
+# from `cargo metadata`. The suffix keeps fork releases from ever clashing with
+# upstream's own v<version> tags, and gives each version exactly one release
+# that later runs can update. If REPO already has that release, it is updated
+# in place: its tag is moved to the built commit and its assets and notes
+# replaced (nothing is done if it already points there). Otherwise it is
+# created at the built commit.
 # Returns 1 on failure, with an explanation on stderr.
 # ---------------------------------------------------------------------------
 
@@ -470,55 +467,22 @@ release_repo() {
     return 1
   fi
 
-  # Existing release tags, and every tag on GitHub (the fork's, and its
-  # parent's if it has an upstream remote) with the commit it points at
-  # ("<sha> <tag>"; the peeled ^{} line of an annotated tag comes last and wins
-  # below). Upstream's tags never reach the fork via `gh repo sync`, but a
-  # release reusing one of their names at another commit would be misleading
-  # and clash in local clones' refs/tags.
-  local releases_txt tags_txt upstream_tags_txt=""
+  local tag="v$version-forked"
+
+  # Whether the release exists, and the commit its tag points at on GitHub (the
+  # peeled ^{} line of an annotated tag comes last and wins).
+  local releases_txt tag_txt released=false tag_sha="" line t
   releases_txt="$(gh release list -R "$repo" --limit 1000 --json tagName --jq '.[].tagName')" || return 1
-  tags_txt="$(git -C "$dir" ls-remote --tags origin)" || return 1
-  if git -C "$dir" remote get-url upstream >/dev/null 2>&1; then
-    upstream_tags_txt="$(git -C "$dir" ls-remote --tags upstream)" || return 1
-  fi
-
-  local -A released=() tag_sha=() upstream_tag_sha=()
-  local line t s
+  tag_txt="$(git -C "$dir" ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")" || return 1
   while IFS= read -r t; do
-    [[ -n "$t" ]] || continue
-    released["$t"]=1
-  done <<< "$releases_txt"
-  while IFS=$'\t' read -r s line; do
-    [[ -n "$line" ]] || continue
-    t="${line#refs/tags/}"
-    tag_sha["${t%^\{\}}"]="$s"
-  done <<< "$tags_txt"
-  while IFS=$'\t' read -r s line; do
-    [[ -n "$line" ]] || continue
-    t="${line#refs/tags/}"
-    upstream_tag_sha["${t%^\{\}}"]="$s"
-  done <<< "$upstream_tags_txt"
-
-  # If upstream already has v<version> for different code, this fork's
-  # releases of that version are v<version>-forked instead.
-  local base="v$version" tag="" t2 n
-  if [[ -n "${upstream_tag_sha[$base]:-}" && "${upstream_tag_sha[$base]}" != "$sha" ]]; then
-    base="$base-forked"
-  fi
-
-  # A release of this version already exists (the newest, if earlier runs left
-  # several -vN ones): update it in place instead of adding another -vN.
-  if [[ -n "${released[$base]:-}" ]]; then
-    tag="$base"
-  fi
-  for t2 in "${!released[@]}"; do
-    [[ "$t2" =~ ^"$base"-v([0-9]+)$ ]] || continue
-    n="${BASH_REMATCH[1]}"
-    if [[ -z "$tag" || "$tag" == "$base" ]] || ((n > ${tag##*-v})); then
-      tag="$t2"
+    if [[ "$t" == "$tag" ]]; then
+      released=true
     fi
-  done
+  done <<< "$releases_txt"
+  while IFS=$'\t' read -r t line; do
+    [[ -n "$line" ]] || continue
+    tag_sha="$t"
+  done <<< "$tag_txt"
 
   local assets=(
     "$BUILD_DIR/$name/$name-linux-x86_64"
@@ -529,23 +493,24 @@ release_repo() {
 - \`$name-linux-x86_64\`: x86_64-unknown-linux-gnu, glibc 2.35
 - \`$name-windows-x86_64.exe\`: x86_64-pc-windows-msvc"
 
-  if [[ -n "$tag" ]]; then
-    if [[ "${tag_sha[$tag]:-}" == "$sha" ]]; then
-      echo "Already released: $repo $tag ($sha)"
-      return 0
-    fi
+  if [[ "$released" == true && "$tag_sha" == "$sha" ]]; then
+    echo "Already released: $repo $tag ($sha)"
+    return 0
+  fi
 
-    # Editing a release's target doesn't move an existing tag, so move the tag
-    # ref itself (or recreate it, if it was deleted), then replace the assets
-    # and notes.
+  # Neither `gh release create --target` nor `gh release edit --target` moves a
+  # tag that already exists, so point the tag at the built commit first
+  # (creating it if missing).
+  if [[ -z "$tag_sha" ]]; then
+    gh api -X POST "repos/$repo/git/refs" \
+      -f ref="refs/tags/$tag" -f sha="$sha" >/dev/null || return 1
+  elif [[ "$tag_sha" != "$sha" ]]; then
+    gh api -X PATCH "repos/$repo/git/refs/tags/$tag" \
+      -f sha="$sha" -F force=true >/dev/null || return 1
+  fi
+
+  if [[ "$released" == true ]]; then
     echo "Updating release $tag on $repo to $sha..."
-    if [[ -n "${tag_sha[$tag]:-}" ]]; then
-      gh api -X PATCH "repos/$repo/git/refs/tags/$tag" \
-        -f sha="$sha" -F force=true >/dev/null || return 1
-    else
-      gh api -X POST "repos/$repo/git/refs" \
-        -f ref="refs/tags/$tag" -f sha="$sha" >/dev/null || return 1
-    fi
     gh release upload "$tag" "${assets[@]}" -R "$repo" --clobber || return 1
     gh release edit "$tag" -R "$repo" \
       --title "$name $tag" \
@@ -554,25 +519,10 @@ release_repo() {
     return 0
   fi
 
-  # No release of this version yet: the base tag, unless it is already on
-  # GitHub (the fork's or upstream's) at another commit; then -v2, -v3, ...
-  n=1
-  while true; do
-    tag="$base"
-    if ((n > 1)); then
-      tag="$base-v$n"
-    fi
-    if [[ -z "${tag_sha[$tag]:-}" || "${tag_sha[$tag]}" == "$sha" ]] &&
-      [[ -z "${upstream_tag_sha[$tag]:-}" || "${upstream_tag_sha[$tag]}" == "$sha" ]]; then
-      break
-    fi
-    ((n++))
-  done
-
   echo "Creating release $tag on $repo at $sha..."
   gh release create "$tag" "${assets[@]}" \
     -R "$repo" \
-    --target "$sha" \
+    --verify-tag \
     --title "$name $tag" \
     --notes "$notes" || return 1
 
