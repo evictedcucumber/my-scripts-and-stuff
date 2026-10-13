@@ -22,9 +22,12 @@
 #   5. if the repo is owned by the authenticated user (i.e. your fork, never
 #      the upstream parent) and both targets built, creates a GitHub release
 #      on it with both binaries attached, tagged with the binary's version
-#      (`cargo metadata`): v<version>, or v<version>-v2, -v3, ... when that
-#      version is already released (or tagged at another commit). Skipped if
-#      a release of that version already points at the built commit.
+#      (`cargo metadata`): v<version>, or v<version>-forked when upstream
+#      already has that tag at another commit (-v2, -v3, ... appended if the
+#      tag is still taken at another commit). If a release under that tag
+#      already exists, it is updated in place instead (tag moved to the built
+#      commit, assets and notes replaced); skipped if it already points at the
+#      built commit.
 #
 # Non-fork repos in the list are just cloned/fetched and fast-forwarded on their
 # default branch. Failures are collected per repo (and per build target) and
@@ -79,8 +82,9 @@ Usage: sync_archive_forks.sh [-f|--force] [--no-build] [--no-release] [-h|--help
 Clone/sync every repo in a GitHub star list into DEST_DIR, syncing forks to
 their upstream default branch on GitHub first, then release-build each repo's
 main binary for Linux and Windows into BUILD_DIR/<name>/ (macOS is skipped),
-then publish them as a GitHub release (v<version>, or v<version>-vN if that
-version is already released) on each repo you own.
+then publish them as a GitHub release (v<version>, or v<version>-forked if
+upstream already has that tag; an existing release of that version is updated
+in place) on each repo you own.
 
 Arguments:
   DEST_DIR      Where repos are cloned (default: ~/repos/archive-forks).
@@ -431,11 +435,14 @@ build_target() {
 #
 #   release_repo REPO NAME DIR BRANCH
 #
-# The tag is v<version> of package NAME (from `cargo metadata`); if REPO already
-# has a release with that tag, or the tag exists on GitHub at another commit
-# (e.g. inherited from upstream), it tries v<version>-v2, -v3, ... A tag that
-# already exists at the built commit without a release is reused. Nothing is
-# created if a release of this version already points at the built commit.
+# The tag is v<version> of package NAME (from `cargo metadata`), or
+# v<version>-forked if upstream already has v<version> at another commit. If
+# REPO already has a release under that tag (or the newest <tag>-vN), it is
+# updated in place: its tag is moved to the built commit and its assets and
+# notes replaced (nothing is done if it already points there). Otherwise a new
+# release is created under that tag, or <tag>-v2, -v3, ... if it exists on
+# GitHub at another commit; a tag already at the built commit without a release
+# is reused.
 # Returns 1 on failure, with an explanation on stderr.
 # ---------------------------------------------------------------------------
 
@@ -493,39 +500,81 @@ release_repo() {
     upstream_tag_sha["${t%^\{\}}"]="$s"
   done <<< "$upstream_tags_txt"
 
-  local base="v$version" tag n=1
-  while true; do
-    tag="$base"
-    if ((n > 1)); then
-      tag="$base-v$n"
-    fi
+  # If upstream already has v<version> for different code, this fork's
+  # releases of that version are v<version>-forked instead.
+  local base="v$version" tag="" t2 n
+  if [[ -n "${upstream_tag_sha[$base]:-}" && "${upstream_tag_sha[$base]}" != "$sha" ]]; then
+    base="$base-forked"
+  fi
 
-    if [[ -n "${released[$tag]:-}" ]]; then
-      if [[ "${tag_sha[$tag]:-}" == "$sha" ]]; then
-        echo "Already released: $repo $tag ($sha)"
-        return 0
-      fi
-    elif [[ -z "${tag_sha[$tag]:-}" || "${tag_sha[$tag]}" == "$sha" ]] &&
-      [[ -z "${upstream_tag_sha[$tag]:-}" || "${upstream_tag_sha[$tag]}" == "$sha" ]]; then
-      break
+  # A release of this version already exists (the newest, if earlier runs left
+  # several -vN ones): update it in place instead of adding another -vN.
+  if [[ -n "${released[$base]:-}" ]]; then
+    tag="$base"
+  fi
+  for t2 in "${!released[@]}"; do
+    [[ "$t2" =~ ^"$base"-v([0-9]+)$ ]] || continue
+    n="${BASH_REMATCH[1]}"
+    if [[ -z "$tag" || "$tag" == "$base" ]] || ((n > ${tag##*-v})); then
+      tag="$t2"
     fi
-    ((n++))
   done
 
   local assets=(
     "$BUILD_DIR/$name/$name-linux-x86_64"
     "$BUILD_DIR/$name/$name-windows-x86_64.exe"
   )
+  local notes="Automated build of \`$name\` $version from $branch@$sha.
+
+- \`$name-linux-x86_64\`: x86_64-unknown-linux-gnu, glibc 2.35
+- \`$name-windows-x86_64.exe\`: x86_64-pc-windows-msvc"
+
+  if [[ -n "$tag" ]]; then
+    if [[ "${tag_sha[$tag]:-}" == "$sha" ]]; then
+      echo "Already released: $repo $tag ($sha)"
+      return 0
+    fi
+
+    # Editing a release's target doesn't move an existing tag, so move the tag
+    # ref itself (or recreate it, if it was deleted), then replace the assets
+    # and notes.
+    echo "Updating release $tag on $repo to $sha..."
+    if [[ -n "${tag_sha[$tag]:-}" ]]; then
+      gh api -X PATCH "repos/$repo/git/refs/tags/$tag" \
+        -f sha="$sha" -F force=true >/dev/null || return 1
+    else
+      gh api -X POST "repos/$repo/git/refs" \
+        -f ref="refs/tags/$tag" -f sha="$sha" >/dev/null || return 1
+    fi
+    gh release upload "$tag" "${assets[@]}" -R "$repo" --clobber || return 1
+    gh release edit "$tag" -R "$repo" \
+      --title "$name $tag" \
+      --notes "$notes" >/dev/null || return 1
+    echo "Updated: https://github.com/$repo/releases/tag/$tag"
+    return 0
+  fi
+
+  # No release of this version yet: the base tag, unless it is already on
+  # GitHub (the fork's or upstream's) at another commit; then -v2, -v3, ...
+  n=1
+  while true; do
+    tag="$base"
+    if ((n > 1)); then
+      tag="$base-v$n"
+    fi
+    if [[ -z "${tag_sha[$tag]:-}" || "${tag_sha[$tag]}" == "$sha" ]] &&
+      [[ -z "${upstream_tag_sha[$tag]:-}" || "${upstream_tag_sha[$tag]}" == "$sha" ]]; then
+      break
+    fi
+    ((n++))
+  done
 
   echo "Creating release $tag on $repo at $sha..."
   gh release create "$tag" "${assets[@]}" \
     -R "$repo" \
     --target "$sha" \
     --title "$name $tag" \
-    --notes "Automated build of \`$name\` $version from $branch@$sha.
-
-- \`$name-linux-x86_64\`: x86_64-unknown-linux-gnu, glibc 2.35
-- \`$name-windows-x86_64.exe\`: x86_64-pc-windows-msvc" || return 1
+    --notes "$notes" || return 1
 
   echo "Released: https://github.com/$repo/releases/tag/$tag"
 }
