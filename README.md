@@ -118,6 +118,20 @@ up the syncing.
      downloaded into `~/.cache/cargo-xwin` on first use.
    - macOS: **skipped**. It can't be cross-built from Linux without Apple's
      SDK, and upstream builds it on macOS runners.
+   - **Fonts**: if the repo's `.github/workflows/release.yml` pins a
+     [storytold/craft-fonts](https://github.com/storytold/craft-fonts) commit
+     (a `craft-fonts-ref:` input, or `ref:` on a craft-fonts checkout step),
+     that commit is checked out into `CRAFT_FONTS_CACHE` and both builds get
+     `CRAFT_FONTS_DIR` + `CRAFT_FONTS_REQUIRED=1`, exactly like upstream's
+     release builds. Without this the apps silently build with no embedded
+     fonts (deckcraft warns, because its `.cargo/config.toml` points at a
+     `../craft-fonts` sibling checkout). If the fonts can't be checked out, the
+     repo isn't built.
+   - Windows **icon/version resources are not embedded** (e.g. filmcraft warns
+     `built without icon/version resources (cross-compiled from a non-Windows
+     host)`): the apps only depend on `winresource` on Windows hosts, so
+     there's no way to embed them from Linux without patching the forks. The
+     `.exe` works; it just has the default icon in Explorer and the taskbar.
 
    Builds run from the working tree, so a clone that isn't on the default
    branch is reported and not built. Binaries are copied, not moved, so
@@ -126,6 +140,14 @@ up the syncing.
    have in common (same version, features and release profile) compile once.
    Each repo keeps its own release profile, so binaries are optimised as
    upstream intends; repos with different profiles just share less.
+   On top of that, builds go through **sccache** (`RUSTC_WRAPPER=sccache`,
+   cache in `~/.cache/sccache`), which also caches C/assembly objects from
+   `cc`-based build scripts (e.g. `aws-lc-sys`, for both zig and `clang-cl`).
+   That covers what cargo's fingerprints throw away: a crate rebuilt because
+   an env var or flag changed (`CRAFT_FONTS_DIR`, `CFLAGS_*`), a cleaned or
+   deleted target dir, or C code shared between repos. sccache's Rust cache
+   is keyed on absolute paths, so it only hits while `CARGO_TARGET_DIR`
+   stays the same. Hit/miss stats are printed at the end of the run.
 5. **Releases** both binaries on GitHub (`gh release create`) — only on repos
    owned by the `gh` user (your forks; never the upstream parent or anyone
    else's repo in the list), and only when both the Linux and Windows builds
@@ -139,8 +161,10 @@ up the syncing.
    (`gh release upload --clobber`). If it already points at the built commit,
    nothing is done.
 
-Non-fork repos in the list are just cloned/fetched and fast-forwarded on their
-default branch. A fork whose branch has diverged from upstream, a fork that is
+Repos with no binary named after the repo (checked with `cargo metadata`), such
+as **craft-fonts** — a font/library repo the apps build against — are synced
+(steps 1–3) but not built or released. Non-fork repos in the list are just
+cloned/fetched and fast-forwarded on their default branch. A fork whose branch has diverged from upstream, a fork that is
 archived (read-only) on GitHub, or a local clone with diverged commits is
 reported as failed rather than overwritten. Each failed step (sync, clone,
 each build target) is listed at the end and the script **exits 1**.
@@ -165,6 +189,17 @@ STAR_LIST="Other List" ./scripts/git/sync_archive_forks/sync_archive_forks.sh
 - `CARGO_TARGET_DIR` — env var; cargo target dir shared by all repos (default
   `~/.cache/archive-forks/target`). Per-repo `target/` dirs from earlier runs
   are no longer used and can be deleted.
+- `RUSTC_WRAPPER` — env var; compiler wrapper for the builds (default
+  `sccache`). Set it to an empty string to build without one; any other value
+  you've already exported is used as-is. sccache's own settings
+  (`SCCACHE_DIR`, `SCCACHE_CACHE_SIZE`, default 10 GiB, ...) apply as usual.
+- `CRAFT_FONTS_CACHE` — env var; the craft-fonts checkout that font-embedding
+  builds use (default `~/.cache/archive-forks/craft-fonts`), switched between
+  the commits the repos pin. When craft-fonts is in the star list (your fork,
+  synced to `DEST_DIR/craft-fonts` like the others), it is a detached
+  `git worktree` of that clone, so nothing is downloaded twice and the synced
+  clone's branch is left alone; otherwise it is a standalone clone of
+  upstream.
 
 Star lists are only exposed through the GraphQL API (`viewer.lists`), so the
 list is read with `gh api graphql`, not `gh repo list`.
@@ -184,7 +219,7 @@ beside it and re-execs itself inside that flake's devShell
 (`nix develop path:<script dir> --command ...`), which provides `gh`, `git`,
 `jq`, a Rust toolchain with the `x86_64-pc-windows-msvc` std (from
 [rust-overlay](https://github.com/oxalica/rust-overlay)), `cargo-zigbuild`,
-`zig`, `cargo-xwin`, clang/lld/llvm, and `pkg-config` + `alsa-lib` (for
+`zig`, `cargo-xwin`, clang/lld/llvm, `sccache`, and `pkg-config` + `alsa-lib` (for
 `alsa-sys`, which needs `pkg-config --libs --cflags alsa`). So it runs from any directory — no
 direnv or `nix develop` needed — as long as `flake.nix`/`flake.lock` stay next
 to it; symlinking the script (e.g. into `~/bin`) works too. The first run

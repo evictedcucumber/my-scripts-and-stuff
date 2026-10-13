@@ -42,6 +42,8 @@
           llvmPackages.llvm
           pkg-config
           rust
+          # RUSTC_WRAPPER: caches rustc (and cc-rs C) outputs across repos/runs.
+          sccache
           zig
           # alsa-sys (filmcraft, deckcraft) finds libasound via pkg-config.
           alsa-lib.dev

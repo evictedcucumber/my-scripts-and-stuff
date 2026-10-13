@@ -19,6 +19,17 @@
 #                                   its interpreter into /nix/store)
 #        <name>-windows-x86_64.exe  cargo xwin, x86_64-pc-windows-msvc
 #      macOS is skipped: it can't be cross-built from Linux without Apple's SDK.
+#      If the repo's .github/workflows/release.yml pins a storytold/craft-fonts
+#      commit (`craft-fonts-ref:`, or `ref:` on a craft-fonts checkout step),
+#      that commit is checked out into CRAFT_FONTS_CACHE (a worktree of
+#      DEST_DIR/craft-fonts when craft-fonts is itself in the star list, else
+#      a clone of upstream) and the build gets
+#      CRAFT_FONTS_DIR + CRAFT_FONTS_REQUIRED=1 like upstream's release builds,
+#      so the fonts are embedded (and a missing font is an error, not a
+#      silently font-less binary).
+#      Windows icon/version resources are not embedded: the apps only pull in
+#      `winresource` on Windows hosts, so their build.rs skips it (with a
+#      warning) when cross-compiling.
 #   5. if the repo is owned by the authenticated user (i.e. your fork, never
 #      the upstream parent) and both targets built, creates a GitHub release
 #      on it with both binaries attached, tagged v<version>-forked from the
@@ -27,8 +38,9 @@
 #      updated in place instead (tag moved to the built commit, assets and
 #      notes replaced); skipped if it already points at the built commit.
 #
-# Non-fork repos in the list are just cloned/fetched and fast-forwarded on their
-# default branch. Failures are collected per repo (and per build target) and
+# Repos without such a binary (e.g. craft-fonts, a library/asset repo) are
+# synced but not built or released. Non-fork repos in the list are just
+# cloned/fetched and fast-forwarded on their default branch. Failures are collected per repo (and per build target) and
 # summarised at the end; the script exits 1 if anything failed.
 #
 # Usage:
@@ -53,13 +65,24 @@
 #                 Cargo target dir shared by every repo, so dependencies built
 #                 with matching versions, features and profile settings are
 #                 compiled once (default: ~/.cache/archive-forks/target).
+#   RUSTC_WRAPPER Compiler wrapper for the builds (default: sccache, which
+#                 caches compiled crates in SCCACHE_DIR, default
+#                 ~/.cache/sccache, so work the shared target dir can't reuse -
+#                 a crate rebuilt after a flag/env change, a wiped target dir,
+#                 the same crate in another repo's profile - is still a cache
+#                 hit). Set it empty to build without a wrapper.
+#   CRAFT_FONTS_CACHE
+#                 craft-fonts checkout used for font-embedding builds: a
+#                 worktree of DEST_DIR/craft-fonts if that exists, else a clone
+#                 of storytold/craft-fonts
+#                 (default: ~/.cache/archive-forks/craft-fonts).
 #
 # All git traffic to GitHub goes over HTTPS using gh's token (SSH remotes are
 # rewritten for the run), so no SSH key or passphrase is needed.
 #
 # Requirements: nix (flakes are enabled per-invocation) and an authenticated gh
 # login. Everything else - gh, git, jq, cargo (with the x86_64-pc-windows-msvc
-# std), cargo-zigbuild, zig, cargo-xwin, clang/lld/llvm - comes from the
+# std), cargo-zigbuild, zig, cargo-xwin, clang/lld/llvm, sccache - comes from the
 # flake.nix next to this script: the script re-execs itself inside that flake's
 # devShell (`nix develop`), so it runs from any directory without direnv.
 #
@@ -100,6 +123,10 @@ Environment:
   BUILD_DIR     Where binaries go (default: ~/builds/archive-forks).
   CARGO_TARGET_DIR
                 Shared cargo target dir (default: ~/.cache/archive-forks/target).
+  RUSTC_WRAPPER Compiler wrapper (default: sccache; empty to disable).
+  CRAFT_FONTS_CACHE
+                craft-fonts clone for builds that embed it
+                (default: ~/.cache/archive-forks/craft-fonts).
 
 Exits 1 if any repo failed.
 EOF
@@ -189,6 +216,14 @@ BUILD_DIR="${BUILD_DIR:-$HOME/builds/archive-forks}"
 # cargo reuses any artifact whose versions/features/profile match. Each repo
 # keeps its own release profile; repos with different profiles just don't share.
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/archive-forks/target}"
+# sccache caches compiled crates (and, via cc-rs, C objects) beyond what the
+# shared target dir reuses. An already-set RUSTC_WRAPPER - including an empty
+# one, which disables wrapping - is left alone.
+export RUSTC_WRAPPER="${RUSTC_WRAPPER-sccache}"
+
+# The repos' release builds embed fonts from this repo at a pinned commit.
+CRAFT_FONTS_REPO="storytold/craft-fonts"
+CRAFT_FONTS_CACHE="${CRAFT_FONTS_CACHE:-$HOME/.cache/archive-forks/craft-fonts}"
 
 # ---------------------------------------------------------------------------
 # Sanity checks
@@ -197,6 +232,9 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/archive-forks/target}"
 REQUIRED_CMDS=(gh git jq)
 if [[ "$BUILD" == true ]]; then
   REQUIRED_CMDS+=(cargo cargo-zigbuild zig cargo-xwin)
+  if [[ -n "$RUSTC_WRAPPER" ]]; then
+    REQUIRED_CMDS+=("$RUSTC_WRAPPER")
+  fi
 fi
 
 for cmd in "${REQUIRED_CMDS[@]}"; do
@@ -394,6 +432,115 @@ update_local() {
       git fetch origin "$refspec" || exit 1
     fi
   )
+}
+
+# ---------------------------------------------------------------------------
+# Print the craft-fonts commit a repo's release workflow builds with, if any.
+#
+#   craft_fonts_ref DIR
+#
+# Recognises both forms used in .github/workflows/release.yml: a
+# `craft-fonts-ref: <sha>` input to the shared release workflow, and a
+# `ref: <sha>` in the same step as `repository: storytold/craft-fonts`.
+# Prints nothing if the repo doesn't use craft-fonts.
+# ---------------------------------------------------------------------------
+
+craft_fonts_ref() {
+  local workflow="$1/.github/workflows/release.yml"
+  [[ -f "$workflow" ]] || return 0
+
+  local input_re='^[[:space:]]*craft-fonts-ref:[[:space:]]*([^[:space:]#]+)'
+  local repo_re="repository:[[:space:]]*$CRAFT_FONTS_REPO([[:space:]#]|\$)"
+  local ref_re='^[[:space:]]*ref:[[:space:]]*([^[:space:]#]+)'
+  local step_re='^[[:space:]]*-[[:space:]]'
+  local line in_fonts_step=false
+
+  while IFS= read -r line; do
+    if [[ "$line" =~ $input_re ]]; then
+      echo "${BASH_REMATCH[1]}"
+      return 0
+    fi
+    # A new step (`- uses:`/`- name:`) ends the craft-fonts checkout step.
+    if [[ "$line" =~ $step_re ]]; then
+      in_fonts_step=false
+    fi
+    if [[ "$line" =~ $repo_re ]]; then
+      in_fonts_step=true
+    elif [[ "$in_fonts_step" == true && "$line" =~ $ref_re ]]; then
+      echo "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  done < "$workflow"
+}
+
+# ---------------------------------------------------------------------------
+# Check out craft-fonts at REF in CRAFT_FONTS_CACHE.
+#
+#   prepare_craft_fonts REF
+#
+# If craft-fonts is in the star list (synced to DEST_DIR/craft-fonts in phase
+# 1), CRAFT_FONTS_CACHE is a detached worktree of that clone, so no second copy
+# is downloaded and the synced clone's own branch is never touched. Otherwise
+# it is a standalone clone of upstream. A checkout that doesn't match (or no
+# longer works, e.g. a worktree whose clone was deleted) is recreated.
+# Builds run one at a time, so a single checkout is switched between the refs
+# the repos pin. A ref that is already present locally as a commit is not
+# fetched again.
+# ---------------------------------------------------------------------------
+
+prepare_craft_fonts() {
+  local ref="$1" dir="$CRAFT_FONTS_CACHE"
+  local synced="$DEST_DIR/${CRAFT_FONTS_REPO#*/}" want_git="" have_git=""
+
+  if [[ -d "$synced/.git" ]]; then
+    want_git="$(git -C "$synced" rev-parse --path-format=absolute --git-common-dir)" || return 1
+  fi
+  if [[ -e "$dir/.git" ]]; then
+    have_git="$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  fi
+
+  if [[ -z "$have_git" || (-n "$want_git" && "$have_git" != "$want_git") ]]; then
+    rm -rf -- "$dir"
+    mkdir -p -- "$(dirname -- "$dir")" || return 1
+    if [[ -n "$want_git" ]]; then
+      echo "Adding a worktree of $synced at $dir..."
+      git -C "$synced" worktree prune || return 1
+      git -C "$synced" worktree add --quiet --detach "$dir" || return 1
+    else
+      echo "Cloning $CRAFT_FONTS_REPO into $dir..."
+      git clone --quiet "https://github.com/$CRAFT_FONTS_REPO.git" "$dir" || return 1
+    fi
+  fi
+
+  # Only a full SHA is immutable; anything else (a branch or tag) is re-fetched.
+  if [[ ! "$ref" =~ ^[0-9a-f]{40}$ ]] ||
+    ! git -C "$dir" cat-file -e "$ref^{commit}" 2>/dev/null; then
+    git -C "$dir" fetch --quiet origin "$ref" || return 1
+    ref="$(git -C "$dir" rev-parse FETCH_HEAD)" || return 1
+  fi
+
+  git -C "$dir" -c advice.detachedHead=false \
+    checkout --quiet --force --detach "$ref" || return 1
+  echo "Using $CRAFT_FONTS_REPO@$ref"
+}
+
+# ---------------------------------------------------------------------------
+# Whether a repo has a main binary to build: package NAME with a bin target
+# NAME.
+#
+#   has_main_bin DIR NAME
+#
+# Returns 0 if it does, 1 if not (no Cargo.toml, or e.g. a library-only crate
+# like craft-fonts), 2 if cargo can't read the manifest.
+# ---------------------------------------------------------------------------
+
+has_main_bin() {
+  local dir="$1" name="$2" metadata
+  [[ -f "$dir/Cargo.toml" ]] || return 1
+  metadata="$(cd -- "$dir" && cargo metadata --no-deps --format-version 1 --locked)" || return 2
+  jq -e --arg name "$name" '
+    any(.packages[] | select(.name == $name) | .targets[];
+        .name == $name and (.kind | index("bin")))' <<< "$metadata" >/dev/null || return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -630,6 +777,32 @@ for entry in "${SYNCED[@]}"; do
     continue
   fi
 
+  # Repos with no binary of their own (e.g. craft-fonts, a font/library repo
+  # the others build against) are only synced: nothing to build or release.
+  bin_status=0
+  has_main_bin "$dest" "$name" || bin_status=$?
+  if [[ "$bin_status" -eq 1 ]]; then
+    echo "Not building $repo: no '$name' binary (sync only)."
+    continue
+  elif [[ "$bin_status" -ne 0 ]]; then
+    echo "WARNING: failed to read the cargo metadata of $dest; not building it." >&2
+    FAILED+=("$repo (build: cargo metadata)")
+    continue
+  fi
+
+  # Embed craft-fonts at the commit upstream releases with, or build without it
+  # (unset, so nothing leaks over from the previous repo).
+  unset CRAFT_FONTS_DIR CRAFT_FONTS_REQUIRED
+  fonts_ref="$(craft_fonts_ref "$dest")"
+  if [[ -n "$fonts_ref" ]]; then
+    if ! prepare_craft_fonts "$fonts_ref"; then
+      echo "WARNING: failed to check out $CRAFT_FONTS_REPO@$fonts_ref; not building $repo." >&2
+      FAILED+=("$repo (build: craft-fonts $fonts_ref)")
+      continue
+    fi
+    export CRAFT_FONTS_DIR="$CRAFT_FONTS_CACHE" CRAFT_FONTS_REQUIRED=1
+  fi
+
   # -fno-{function,data}-sections: the cc crate adds -ffunction-sections
   # -fdata-sections by default, and zig's clang then emits section symbols with
   # st_shndx=UND (e.g. aws-lc-sys's obj.o), which lld reports as "undefined
@@ -689,6 +862,10 @@ echo
 echo "Processed ${#ITEMS[@]} repo(s): sources in $DEST_DIR"
 if [[ "$BUILD" == true ]]; then
   echo "Binaries in $BUILD_DIR (macOS skipped: no cross toolchain from Linux)"
+  if [[ "$(basename -- "$RUSTC_WRAPPER")" == sccache ]]; then
+    echo
+    "$RUSTC_WRAPPER" --show-stats || true
+  fi
 fi
 
 if [[ ${#FAILED[@]} -gt 0 ]]; then
