@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# sync_archive_forks.sh
+# sync_craft_forks.sh
 #
-# Reads a GitHub star list (default "Archive Forks") for the authenticated gh
+# Reads a GitHub star list (default "zezura-archive-craft") for the authenticated gh
 # user. It first syncs every repo in it (steps 1-3), then builds every repo that
 # synced cleanly (step 4), then publishes those builds as releases (step 5):
 #   1. if it is a fork, syncs the fork's copy of the upstream default branch
@@ -30,8 +30,8 @@
 #      Windows icon/version resources are not embedded: the apps only pull in
 #      `winresource` on Windows hosts, so their build.rs skips it (with a
 #      warning) when cross-compiling.
-#   5. if the repo is owned by the authenticated user (i.e. your fork, never
-#      the upstream parent) and both targets built, creates a GitHub release
+#   5. if the repo is owned by FORK_OWNER (i.e. your fork in the Zezura-Archive
+#      org, never the upstream parent) and both targets built, creates a GitHub release
 #      on it with both binaries attached, tagged v<version>-forked from the
 #      binary's version (`cargo metadata`), so it never clashes with
 #      upstream's own v<version> tag. If that release already exists, it is
@@ -44,11 +44,11 @@
 # summarised at the end; the script exits 1 if anything failed.
 #
 # Usage:
-#   sync_archive_forks.sh [-f|--force] [--no-build] [--no-release] [-h|--help]
+#   sync_craft_forks.sh [-f|--force] [--no-build] [--no-release] [-h|--help]
 #                         [DEST_DIR]
 #
 # Arguments:
-#   DEST_DIR      Where repos are cloned (default: ~/repos/archive-forks).
+#   DEST_DIR      Where repos are cloned (default: ~/repos/craft-forks).
 #                 Created if missing.
 #
 # Options:
@@ -59,12 +59,14 @@
 #   --no-release  Sync and build; skip step 5.
 #
 # Environment:
-#   STAR_LIST     Name of the star list to read (default: "Archive Forks").
-#   BUILD_DIR     Where binaries are copied (default: ~/builds/archive-forks).
+#   STAR_LIST     Name of the star list to read (default: "zezura-archive-craft").
+#   FORK_OWNER    User/org that owns the forks; only its repos get releases
+#                 (default: Zezura-Archive).
+#   BUILD_DIR     Where binaries are copied (default: ~/builds/craft-forks).
 #   CARGO_TARGET_DIR
 #                 Cargo target dir shared by every repo, so dependencies built
 #                 with matching versions, features and profile settings are
-#                 compiled once (default: ~/.cache/archive-forks/target).
+#                 compiled once (default: ~/.cache/craft-forks/target).
 #   RUSTC_WRAPPER Compiler wrapper for the builds (default: sccache, which
 #                 caches compiled crates in SCCACHE_DIR, default
 #                 ~/.cache/sccache, so work the shared target dir can't reuse -
@@ -75,7 +77,7 @@
 #                 craft-fonts checkout used for font-embedding builds: a
 #                 worktree of DEST_DIR/craft-fonts if that exists, else a clone
 #                 of storytold/craft-fonts
-#                 (default: ~/.cache/archive-forks/craft-fonts).
+#                 (default: ~/.cache/craft-forks/craft-fonts).
 #
 # All git traffic to GitHub goes over HTTPS using gh's token (SSH remotes are
 # rewritten for the run), so no SSH key or passphrase is needed.
@@ -97,7 +99,7 @@ ORIG_ARGS=("$@")
 
 usage() {
   cat <<'EOF'
-Usage: sync_archive_forks.sh [-f|--force] [--no-build] [--no-release] [-h|--help]
+Usage: sync_craft_forks.sh [-f|--force] [--no-build] [--no-release] [-h|--help]
                              [DEST_DIR]
 
 Clone/sync every repo in a GitHub star list into DEST_DIR, syncing forks to
@@ -107,7 +109,7 @@ then publish them as a GitHub release (v<version>-forked; an existing release
 of that version is updated in place) on each repo you own.
 
 Arguments:
-  DEST_DIR      Where repos are cloned (default: ~/repos/archive-forks).
+  DEST_DIR      Where repos are cloned (default: ~/repos/craft-forks).
 
 Options:
   -f, --force   Hard-reset (GitHub and local) instead of fast-forward only.
@@ -119,14 +121,16 @@ Options:
   -h, --help    Show this help.
 
 Environment:
-  STAR_LIST     Star list to read (default: "Archive Forks").
-  BUILD_DIR     Where binaries go (default: ~/builds/archive-forks).
+  STAR_LIST     Star list to read (default: "zezura-archive-craft").
+  FORK_OWNER    Owner of the forks; only its repos get releases
+                (default: Zezura-Archive).
+  BUILD_DIR     Where binaries go (default: ~/builds/craft-forks).
   CARGO_TARGET_DIR
-                Shared cargo target dir (default: ~/.cache/archive-forks/target).
+                Shared cargo target dir (default: ~/.cache/craft-forks/target).
   RUSTC_WRAPPER Compiler wrapper (default: sccache; empty to disable).
   CRAFT_FONTS_CACHE
                 craft-fonts clone for builds that embed it
-                (default: ~/.cache/archive-forks/craft-fonts).
+                (default: ~/.cache/craft-forks/craft-fonts).
 
 Exits 1 if any repo failed.
 EOF
@@ -184,10 +188,10 @@ fi
 # Re-exec this script inside the devShell of the flake.nix beside it (symlinks
 # resolved, so a link in ~/bin works). `path:` copies only this directory into
 # the store rather than the enclosing git repo, and doesn't need the flake files
-# committed. SYNC_ARCHIVE_FORKS_IN_NIX stops the re-exec'd copy looping.
+# committed. SYNC_CRAFT_FORKS_IN_NIX stops the re-exec'd copy looping.
 # ---------------------------------------------------------------------------
 
-if [[ "${SYNC_ARCHIVE_FORKS_IN_NIX:-}" != 1 ]]; then
+if [[ "${SYNC_CRAFT_FORKS_IN_NIX:-}" != 1 ]]; then
   if ! command -v nix >/dev/null 2>&1; then
     echo "Error: required command 'nix' not found in PATH." >&2
     exit 1
@@ -200,7 +204,7 @@ if [[ "${SYNC_ARCHIVE_FORKS_IN_NIX:-}" != 1 ]]; then
     exit 1
   fi
 
-  export SYNC_ARCHIVE_FORKS_IN_NIX=1
+  export SYNC_CRAFT_FORKS_IN_NIX=1
   exec nix --extra-experimental-features 'nix-command flakes' \
     develop "path:$SCRIPT_DIR" --command "$SCRIPT_PATH" "${ORIG_ARGS[@]}"
 fi
@@ -209,13 +213,17 @@ fi
 # Config
 # ---------------------------------------------------------------------------
 
-STAR_LIST="${STAR_LIST:-Archive Forks}"
-DEST_DIR="${1:-$HOME/repos/archive-forks}"
-BUILD_DIR="${BUILD_DIR:-$HOME/builds/archive-forks}"
+STAR_LIST="${STAR_LIST:-zezura-archive-craft}"
+# Releases are only created on repos owned by this account (the org holding
+# the forks), never on the upstream parents or anyone else's repo in the list.
+# The access checks below require you to be it or an active member of it.
+FORK_OWNER="${FORK_OWNER:-Zezura-Archive}"
+DEST_DIR="${1:-$HOME/repos/craft-forks}"
+BUILD_DIR="${BUILD_DIR:-$HOME/builds/craft-forks}"
 # One target dir for all repos: they share most of their dependency tree, and
 # cargo reuses any artifact whose versions/features/profile match. Each repo
 # keeps its own release profile; repos with different profiles just don't share.
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/archive-forks/target}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/craft-forks/target}"
 # sccache caches compiled crates (and, via cc-rs, C objects) beyond what the
 # shared target dir reuses. An already-set RUSTC_WRAPPER - including an empty
 # one, which disables wrapping - is left alone.
@@ -223,7 +231,7 @@ export RUSTC_WRAPPER="${RUSTC_WRAPPER-sccache}"
 
 # The repos' release builds embed fonts from this repo at a pinned commit.
 CRAFT_FONTS_REPO="storytold/craft-fonts"
-CRAFT_FONTS_CACHE="${CRAFT_FONTS_CACHE:-$HOME/.cache/archive-forks/craft-fonts}"
+CRAFT_FONTS_CACHE="${CRAFT_FONTS_CACHE:-$HOME/.cache/craft-forks/craft-fonts}"
 
 # ---------------------------------------------------------------------------
 # Sanity checks
@@ -249,6 +257,74 @@ if ! gh auth status >/dev/null 2>&1; then
   exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# Access checks: fail up front, before anything is synced, if gh's token can't
+# do what the run needs.
+# ---------------------------------------------------------------------------
+
+AUTH_FIX="gh auth refresh -h github.com -s repo,workflow,read:org"
+
+if ! GH_USER="$(gh api user --jq .login)" || [[ -z "$GH_USER" ]]; then
+  echo "Error: failed to look up the authenticated GitHub user." >&2
+  exit 1
+fi
+
+# Classic OAuth tokens (what `gh auth login` creates) report their scopes in
+# X-OAuth-Scopes. repo: clone/fetch, `gh repo sync`, releases. workflow: `gh
+# repo sync` fails to fast-forward a fork past upstream commits that touch
+# .github/workflows/ without it. read:org: the FORK_OWNER membership check
+# below. Fine-grained/app tokens have no such header, so are not checked here.
+if ! auth_headers="$(gh api -i user)"; then
+  echo "Error: failed to query GitHub as $GH_USER." >&2
+  exit 1
+fi
+scopes_line="$(grep -i '^x-oauth-scopes:' <<< "$auth_headers" | tr -d '\r' || true)"
+if [[ -z "$scopes_line" ]]; then
+  echo "WARNING: gh's token reports no OAuth scopes (fine-grained or app token?); skipping the scope check." >&2
+else
+  scopes_csv="${scopes_line#*:}"
+  IFS=', ' read -r -a token_scopes <<< "$scopes_csv"
+  missing_scopes=()
+  for scope in repo workflow read:org; do
+    have=false
+    for s in "${token_scopes[@]}"; do
+      # admin:org and write:org both include read:org.
+      if [[ "$s" == "$scope" ]] ||
+        [[ "$scope" == read:org && ( "$s" == admin:org || "$s" == write:org ) ]]; then
+        have=true
+        break
+      fi
+    done
+    [[ "$have" == true ]] || missing_scopes+=("$scope")
+  done
+  if [[ ${#missing_scopes[@]} -gt 0 ]]; then
+    echo "Error: gh's token is missing scope(s): ${missing_scopes[*]}. Fix with:" >&2
+    echo "  $AUTH_FIX" >&2
+    exit 1
+  fi
+fi
+
+# FORK_OWNER must be you or an org you're an active member of. An org that
+# restricts OAuth app access also rejects this call (with a message saying
+# so), which would otherwise only surface as push/release 403s mid-run.
+if [[ "${FORK_OWNER,,}" != "${GH_USER,,}" ]]; then
+  if ! membership="$(gh api "user/memberships/orgs/$FORK_OWNER" --jq '.state + " " + .role' 2>&1)"; then
+    echo "Error: can't access org '$FORK_OWNER' as $GH_USER:" >&2
+    echo "  $membership" >&2
+    if [[ "$membership" == *"OAuth App access restrictions"* ]]; then
+      echo "Approve GitHub CLI for the org (Settings -> Third-party access -> OAuth app policy), or re-authorize gh and grant the org:" >&2
+    else
+      echo "Check you're a member of '$FORK_OWNER' (and FORK_OWNER is right), then re-authorize gh, granting the org:" >&2
+    fi
+    echo "  $AUTH_FIX" >&2
+    exit 1
+  fi
+  if [[ "${membership%% *}" != active ]]; then
+    echo "Error: your membership of '$FORK_OWNER' is '${membership%% *}', not active. Accept the invitation on GitHub first." >&2
+    exit 1
+  fi
+fi
+
 # Route every git operation on GitHub through HTTPS with gh's token, so no SSH
 # key (passphrase, hardware-key PIN/touch) is needed even if gh's git_protocol
 # is ssh or existing clones have SSH remotes. Set via GIT_CONFIG_* env vars, so
@@ -268,15 +344,6 @@ for entry in "${GIT_ENV_CONFIG[@]}"; do
   git_config_idx=$((git_config_idx + 1))
 done
 export GIT_CONFIG_COUNT="$git_config_idx"
-
-# Releases are only created on repos this user owns (their forks), never on
-# anyone else's repo in the list.
-if [[ "$RELEASE" == true ]]; then
-  if ! GH_USER="$(gh api user --jq .login)" || [[ -z "$GH_USER" ]]; then
-    echo "Error: failed to look up the authenticated GitHub user." >&2
-    exit 1
-  fi
-fi
 
 mkdir -p -- "$DEST_DIR"
 DEST_DIR="$(cd -- "$DEST_DIR" && pwd)"
@@ -334,9 +401,10 @@ if [[ -z "$list_id" ]]; then
 fi
 
 # One TSV line per repo:
-#   nameWithOwner  isFork  isArchived  branch  parentNameWithOwner
+#   nameWithOwner  isFork  isArchived  viewerPermission  branch  parentNameWithOwner
 # where branch is the parent's default branch for forks (what gets synced),
-# otherwise the repo's own default branch. Non-repo items are dropped.
+# otherwise the repo's own default branch. Non-repo items are dropped. Fields
+# that can be empty come last: `read` with IFS=$'\t' merges adjacent tabs.
 # \$id/\$endCursor are GraphQL variables, not shell expansions.
 # shellcheck disable=SC2016
 ITEMS_QUERY='
@@ -350,6 +418,7 @@ query($id: ID!, $endCursor: String) {
             nameWithOwner
             isFork
             isArchived
+            viewerPermission
             defaultBranchRef { name }
             parent { nameWithOwner defaultBranchRef { name } }
           }
@@ -368,6 +437,7 @@ if ! items_tsv="$(
           .nameWithOwner,
           (if .isFork and .parent != null then "true" else "false" end),
           (.isArchived | tostring),
+          (.viewerPermission // "NONE"),
           ((if .isFork and .parent != null
               then .parent.defaultBranchRef.name
               else .defaultBranchRef.name end) // ""),
@@ -391,6 +461,30 @@ echo "Found ${#ITEMS[@]} repo(s) in '$STAR_LIST'. Syncing into $DEST_DIR"
 if [[ ${#ITEMS[@]} -eq 0 ]]; then
   echo "Nothing to do."
   exit 0
+fi
+
+# Every fork gets pushed to (`gh repo sync`, and releases on FORK_OWNER's), so
+# needs write access. Checked for all of them before anything runs. Forks
+# outside FORK_OWNER are still synced but never released - flagged so a
+# mistyped FORK_OWNER or a fork left behind in the move doesn't go unnoticed.
+NO_WRITE=()
+for item in "${ITEMS[@]}"; do
+  IFS=$'\t' read -r repo is_fork _ permission _ <<< "$item"
+  [[ "$is_fork" == true ]] || continue
+  owner="${repo%%/*}"
+  if [[ "$RELEASE" == true && "${owner,,}" != "${FORK_OWNER,,}" ]]; then
+    echo "WARNING: fork $repo is not owned by $FORK_OWNER; it will be synced but not released." >&2
+  fi
+  case "$permission" in
+    ADMIN | MAINTAIN | WRITE) ;;
+    *) NO_WRITE+=("$repo ($permission)") ;;
+  esac
+done
+if [[ ${#NO_WRITE[@]} -gt 0 ]]; then
+  echo "Error: $GH_USER lacks write access to these forks (permission in brackets):" >&2
+  printf '  - %s\n' "${NO_WRITE[@]}" >&2
+  echo "Grant $GH_USER write access to them (or move them into $FORK_OWNER), or drop them from '$STAR_LIST'." >&2
+  exit 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -735,7 +829,7 @@ BUILT=()
 # ---------------------------------------------------------------------------
 
 for item in "${ITEMS[@]}"; do
-  IFS=$'\t' read -r repo is_fork is_archived branch parent <<< "$item"
+  IFS=$'\t' read -r repo is_fork is_archived _ branch parent <<< "$item"
   name="${repo#*/}"
   dest="${DEST_DIR}/${name}"
 
@@ -872,7 +966,7 @@ for entry in "${SYNCED[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
-# Phase 3: release every fully built repo the user owns
+# Phase 3: release every fully built repo FORK_OWNER owns
 # ---------------------------------------------------------------------------
 
 for entry in "${BUILT[@]}"; do
@@ -880,9 +974,11 @@ for entry in "${BUILT[@]}"; do
 
   IFS=$'\t' read -r repo name dest branch <<< "$entry"
 
-  if [[ "${repo%%/*}" != "$GH_USER" ]]; then
+  # GitHub owner names are case-insensitive.
+  owner="${repo%%/*}"
+  if [[ "${owner,,}" != "${FORK_OWNER,,}" ]]; then
     echo
-    echo "Not releasing $repo: owned by ${repo%%/*}, not $GH_USER."
+    echo "Not releasing $repo: owned by $owner, not $FORK_OWNER."
     continue
   fi
 

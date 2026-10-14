@@ -83,9 +83,9 @@ whole run. In this user's setup that config is managed via home-manager in the
 `nixos-config` repo (`home/modules/tools/ssh.nix`), not here — `~/.ssh/config` is a
 generated symlink into the Nix store and shouldn't be edited directly.
 
-## scripts/git/sync_archive_forks/sync_archive_forks.sh
+## scripts/git/sync_craft_forks/sync_craft_forks.sh
 
-Reads a GitHub star list (default **Archive Forks**) for the `gh`-authenticated
+Reads a GitHub star list (default **zezura-archive-craft**) for the `gh`-authenticated
 user and keeps every repo in it mirrored locally. It runs in phases: steps 1–3
 for **every** repo first, then step 4 for each repo that synced cleanly, then
 step 5 for each repo that built cleanly, so a slow or failing build never holds
@@ -103,7 +103,7 @@ up the syncing.
    without touching the working tree.
 4. **Builds** the repo's main binary (the package and bin named after the repo,
    e.g. `apps/photocraft`) in release mode and copies it into
-   `BUILD_DIR/<name>/` (default `~/builds/archive-forks/<name>/`):
+   `BUILD_DIR/<name>/` (default `~/builds/craft-forks/<name>/`):
    - `<name>-linux-x86_64`: `cargo zigbuild` for
      `x86_64-unknown-linux-gnu`, pinned to glibc 2.35 like upstream's
      Ubuntu 22.04 release builds. A plain `cargo build` on NixOS would set the
@@ -149,8 +149,8 @@ up the syncing.
    is keyed on absolute paths, so it only hits while `CARGO_TARGET_DIR`
    stays the same. Hit/miss stats are printed at the end of the run.
 5. **Releases** both binaries on GitHub (`gh release create`) — only on repos
-   owned by the `gh` user (your forks; never the upstream parent or anyone
-   else's repo in the list), and only when both the Linux and Windows builds
+   owned by `FORK_OWNER` (default `Zezura-Archive`, the org holding your forks;
+   never the upstream parent or anyone else's repo in the list), and only when both the Linux and Windows builds
    succeeded. The tag is always `v<version>-forked`, from the binary's
    version in `cargo metadata`. The suffix means a fork release never clashes
    with (or is mistaken for) upstream's own `v<version>` tag, and each version
@@ -170,31 +170,33 @@ reported as failed rather than overwritten. Each failed step (sync, clone,
 each build target) is listed at the end and the script **exits 1**.
 
 ```bash
-./scripts/git/sync_archive_forks/sync_archive_forks.sh              # sync + build
-./scripts/git/sync_archive_forks/sync_archive_forks.sh --no-build   # sync only
-./scripts/git/sync_archive_forks/sync_archive_forks.sh --no-release # sync + build, no releases
-./scripts/git/sync_archive_forks/sync_archive_forks.sh ~/archive    # custom source destination
-STAR_LIST="Other List" ./scripts/git/sync_archive_forks/sync_archive_forks.sh
+./scripts/git/sync_craft_forks/sync_craft_forks.sh              # sync + build
+./scripts/git/sync_craft_forks/sync_craft_forks.sh --no-build   # sync only
+./scripts/git/sync_craft_forks/sync_craft_forks.sh --no-release # sync + build, no releases
+./scripts/git/sync_craft_forks/sync_craft_forks.sh ~/archive    # custom source destination
+STAR_LIST="Other List" ./scripts/git/sync_craft_forks/sync_craft_forks.sh
 ```
 
 - `DEST_DIR` (optional positional) — where repos are cloned; default
-  `~/repos/archive-forks`, created if missing.
+  `~/repos/craft-forks`, created if missing.
 - `-f, --force` — hard-reset instead of fast-forwarding, on GitHub
   (`gh repo sync --force`) and locally (`git reset --hard` / forced ref update).
   **Discards** fork commits that upstream does not have.
 - `--no-build` — sync only; skip steps 4 and 5.
 - `--no-release` — sync and build; skip step 5.
 - `STAR_LIST` — env var; the star list name to read (exact match).
-- `BUILD_DIR` — env var; where binaries go (default `~/builds/archive-forks`).
+- `FORK_OWNER` — env var; user/org that owns the forks, the only owner whose
+  repos get releases (default `Zezura-Archive`, matched case-insensitively).
+- `BUILD_DIR` — env var; where binaries go (default `~/builds/craft-forks`).
 - `CARGO_TARGET_DIR` — env var; cargo target dir shared by all repos (default
-  `~/.cache/archive-forks/target`). Per-repo `target/` dirs from earlier runs
+  `~/.cache/craft-forks/target`). Per-repo `target/` dirs from earlier runs
   are no longer used and can be deleted.
 - `RUSTC_WRAPPER` — env var; compiler wrapper for the builds (default
   `sccache`). Set it to an empty string to build without one; any other value
   you've already exported is used as-is. sccache's own settings
   (`SCCACHE_DIR`, `SCCACHE_CACHE_SIZE`, default 10 GiB, ...) apply as usual.
 - `CRAFT_FONTS_CACHE` — env var; the craft-fonts checkout that font-embedding
-  builds use (default `~/.cache/archive-forks/craft-fonts`), switched between
+  builds use (default `~/.cache/craft-forks/craft-fonts`), switched between
   the commits the repos pin. When craft-fonts is in the star list (your fork,
   synced to `DEST_DIR/craft-fonts` like the others), it is a detached
   `git worktree` of that clone, so nothing is downloaded twice and the synced
@@ -213,8 +215,23 @@ use `gh auth git-credential` as the sole credential helper for `github.com`;
 your global git/gh config and the clones' saved remote URLs are left unchanged.
 
 Requires: `nix`, and `gh` authenticated (and allowed to push to and create
-releases on your forks).
-The script has its own [flake.nix](scripts/git/sync_archive_forks/flake.nix)
+releases on the `FORK_OWNER` org's repos).
+
+Before syncing anything, the script checks that `gh` can do all of that and
+exits with the fix if not:
+
+- the token has the `repo`, `workflow` (needed by `gh repo sync` once upstream
+  touches `.github/workflows/`) and `read:org` scopes — skipped for
+  fine-grained/app tokens, which don't report scopes;
+- you are `FORK_OWNER` or an **active** member of that org — this also
+  catches an org that restricts OAuth app access (approve GitHub CLI under the
+  org's *Settings → Third-party access*);
+- you have write access (`WRITE`/`MAINTAIN`/`ADMIN`) to every fork in the
+  list, and any fork not owned by `FORK_OWNER` is flagged as sync-only.
+
+Most failures are fixed by
+`gh auth refresh -h github.com -s repo,workflow,read:org`.
+The script has its own [flake.nix](scripts/git/sync_craft_forks/flake.nix)
 beside it and re-execs itself inside that flake's devShell
 (`nix develop path:<script dir> --command ...`), which provides `gh`, `git`,
 `jq`, a Rust toolchain with the `x86_64-pc-windows-msvc` std (from
@@ -402,8 +419,8 @@ descends through plain folders, so `~/repos/homelab/foo` is found even though
 `homelab` is neither a repo nor a flake. `.git`, `node_modules`, `.direnv` and
 `.claude` directories (at any depth, so Claude Code worktrees under
 `.claude/worktrees/` are never touched) are not searched, nor is
-`~/repos/archive-forks` (the search root's `archive-forks`, managed by
-`sync_archive_forks.sh`).
+`~/repos/craft-forks` (the search root's `craft-forks`, managed by
+`sync_craft_forks.sh`).
 
 ```bash
 update_flakes.sh                                  # update everything under ~/repos

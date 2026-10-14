@@ -16,7 +16,7 @@
         config.allowUnfree = true;
       };
     in {
-      # sync_archive_forks.sh has its own flake next to it; its build
+      # sync_craft_forks.sh has its own flake next to it; its build
       # toolchain isn't needed here.
       devShells.default = pkgs.mkShell {
         name = "scripts";

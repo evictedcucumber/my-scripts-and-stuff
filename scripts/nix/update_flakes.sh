@@ -9,7 +9,7 @@
 # Intermediate directories (e.g. ~/repos/homelab/) need not be repos or flakes
 # themselves - the search descends through them. Never searched: .git,
 # node_modules, .direnv and .claude directories at any depth, plus
-# <root>/archive-forks (managed by sync_archive_forks.sh). A flake is skipped (and
+# <root>/craft-forks (managed by sync_craft_forks.sh). A flake is skipped (and
 # reported) if it is not inside a git repo, is inside a linked git worktree
 # (the main checkout is the one that gets updated), has a gitignored
 # flake.lock, or already has uncommitted changes to flake.lock (so the sync
@@ -69,7 +69,7 @@ Environment:
   REPOS_DIR   Directory to search (default: ~/repos).
 
 Always left out: .git, node_modules, .direnv and .claude directories at any
-depth, and <root>/archive-forks.
+depth, and <root>/craft-forks.
 
 Exits 1 if any flake failed to update or any commit failed.
 EOF
@@ -187,7 +187,7 @@ FLAKE_FILES=()
 mapfile -d '' -t FLAKE_FILES < <(
   find "$ROOT" \
     \( -name .git -o -name node_modules -o -name .direnv -o -name .claude \
-    -o -path "$ROOT/archive-forks" \) -prune -o \
+    -o -path "$ROOT/craft-forks" \) -prune -o \
     -type f -name flake.nix -print0 | sort -z
 )
 
