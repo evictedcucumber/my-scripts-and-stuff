@@ -92,16 +92,14 @@ everything else is an env var.
   also hides file names/metadata. Passed to `7z` as `-p...`, so it is briefly
   visible in the process list — only use on a trusted host.
 
-### SSH / hardware key (Yubikey) note
+### Git transport (HTTPS via gh, never SSH)
 
-If `gh`'s git protocol is SSH and the key is hardware-backed (e.g. a `_sk` resident
-key), every `git`/`gh` operation opens a new SSH connection and re-triggers a
-PIN/touch prompt — this script does clone + fetch per repo, so a large repo list
-means a lot of prompts. Fix is SSH connection multiplexing (`ControlMaster` /
-`ControlPersist`) scoped to `github.com` in SSH config, so one PIN/touch covers the
-whole run. In this user's setup that config is managed via home-manager in the
-`nixos-config` repo (`home/modules/tools/ssh.nix`), not here — `~/.ssh/config` is a
-generated symlink into the Nix store and shouldn't be edited directly.
+Every clone/fetch goes over HTTPS, authenticated by `gh` (`gh auth
+git-credential`), regardless of `gh config get git_protocol` — repos are cloned
+from an explicit `https://github.com/...` URL, and SSH-style `github.com`
+submodule URLs are rewritten to HTTPS. This is set through `GIT_CONFIG_*`
+environment variables for the run only; your git/gh config is untouched. So no
+SSH key — and no hardware-key (Yubikey) PIN/touch prompt per repo — is needed.
 
 ## scripts/git/sync_craft_forks/sync_craft_forks.sh
 

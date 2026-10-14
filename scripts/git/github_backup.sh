@@ -33,6 +33,9 @@
 #                       visible to other local users via `ps` while 7z runs;
 #                       only use this on a trusted host.
 #
+# All git traffic goes over HTTPS using gh's credentials (never SSH), whatever
+# gh's git_protocol setting is.
+#
 # Requirements: gh (authenticated), git, 7z, jq
 #
 set -euo pipefail
@@ -165,6 +168,30 @@ if [[ -e "$ARCHIVE_PATH" ]]; then
   echo "Error: archive already exists: $ARCHIVE_PATH" >&2
   exit 1
 fi
+
+# ---------------------------------------------------------------------------
+# Git transport: always HTTPS, authenticated by gh
+#
+# Clones/fetches never use SSH, whatever gh's git_protocol is, so no SSH key
+# (or hardware-key PIN/touch prompt) is needed. Exported via GIT_CONFIG_* so
+# it applies to every git command below (fetch, submodules) without touching
+# the user's git config:
+#   - gh is the only credential helper for github.com HTTPS;
+#   - SSH-style github.com URLs (e.g. in .gitmodules) are rewritten to HTTPS.
+# ---------------------------------------------------------------------------
+
+export GIT_CONFIG_COUNT=4
+export GIT_CONFIG_KEY_0='credential.https://github.com.helper'
+export GIT_CONFIG_VALUE_0=''
+export GIT_CONFIG_KEY_1='credential.https://github.com.helper'
+export GIT_CONFIG_VALUE_1='!gh auth git-credential'
+export GIT_CONFIG_KEY_2='url.https://github.com/.insteadOf'
+export GIT_CONFIG_VALUE_2='git@github.com:'
+export GIT_CONFIG_KEY_3='url.https://github.com/.insteadOf'
+export GIT_CONFIG_VALUE_3='ssh://git@github.com/'
+
+# Never fall back to an interactive username/password prompt.
+export GIT_TERMINAL_PROMPT=0
 
 # ---------------------------------------------------------------------------
 # Validate gh access
@@ -432,7 +459,9 @@ for repo in "${REPOS[@]}"; do
   echo
   echo "==== $repo ===="
 
-  if ! gh repo clone "$repo" "$dest"; then
+  # A full https:// URL makes gh clone over HTTPS even if its git_protocol is
+  # ssh (a bare "owner/name" would follow git_protocol).
+  if ! gh repo clone "https://github.com/${repo}.git" "$dest"; then
     echo "WARNING: failed to clone $repo" >&2
     FAILED+=("$repo")
     rm -rf -- "$dest"
