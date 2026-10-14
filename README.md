@@ -399,8 +399,11 @@ Recursively searches `~/repos` for every `flake.nix`, runs `nix flake update`
 next to each, and commits the resulting `flake.lock` change as
 `chore(flake): sync YYYY-MM-DD` (today's local date). **Never pushes.** The search
 descends through plain folders, so `~/repos/homelab/foo` is found even though
-`homelab` is neither a repo nor a flake. `.git`, `node_modules` and `.direnv` are
-not searched.
+`homelab` is neither a repo nor a flake. `.git`, `node_modules`, `.direnv` and
+`.claude` directories (at any depth, so Claude Code worktrees under
+`.claude/worktrees/` are never touched) are not searched, nor is
+`~/repos/archive-forks` (the search root's `archive-forks`, managed by
+`sync_archive_forks.sh`).
 
 ```bash
 update_flakes.sh                                  # update everything under ~/repos

@@ -7,7 +7,9 @@
 # change with the message "chore(flake): sync YYYY-MM-DD". Never pushes.
 #
 # Intermediate directories (e.g. ~/repos/homelab/) need not be repos or flakes
-# themselves - the search descends through them. A flake is skipped (and
+# themselves - the search descends through them. Never searched: .git,
+# node_modules, .direnv and .claude directories at any depth, plus
+# <root>/archive-forks (managed by sync_archive_forks.sh). A flake is skipped (and
 # reported) if it is not inside a git repo, is inside a linked git worktree
 # (the main checkout is the one that gets updated), has a gitignored
 # flake.lock, or already has uncommitted changes to flake.lock (so the sync
@@ -65,6 +67,9 @@ Each IGNORE is a directory to leave out (with everything beneath it):
 
 Environment:
   REPOS_DIR   Directory to search (default: ~/repos).
+
+Always left out: .git, node_modules, .direnv and .claude directories at any
+depth, and <root>/archive-forks.
 
 Exits 1 if any flake failed to update or any commit failed.
 EOF
@@ -181,7 +186,8 @@ echo "Searching for flakes under $ROOT..."
 FLAKE_FILES=()
 mapfile -d '' -t FLAKE_FILES < <(
   find "$ROOT" \
-    \( -name .git -o -name node_modules -o -name .direnv \) -prune -o \
+    \( -name .git -o -name node_modules -o -name .direnv -o -name .claude \
+    -o -path "$ROOT/archive-forks" \) -prune -o \
     -type f -name flake.nix -print0 | sort -z
 )
 
