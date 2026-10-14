@@ -39,8 +39,10 @@ streams, and creation/access timestamps are not captured — see the script's
 
 ## scripts/git/github_backup.sh
 
-Backs up every repo (public + private) owned by `OWNER` into a single timestamped
-(UTC) `.7z` in `$OUTPUT_DIR` (default `$PWD`). For each repo: clones it,
+Backs up every repo (public + private) owned by each account in `OWNERS` into a
+single timestamped (UTC) `.7z` in `$OUTPUT_DIR` (default `$PWD`), with each
+owner's repos in their own top-level `<owner>/` folder (e.g.
+`evictedcucumber/foo/`, `Zezura-Archive/bar/`). For each repo: clones it,
 force-fetches all tags, checks out submodules, and creates local tracking
 branches for every remote branch, so the resulting archive is a self-contained,
 browsable set of working trees — not a bare mirror. After creation the archive
@@ -51,19 +53,37 @@ on stderr, and the script **exits 1** so an incomplete backup is never mistaken
 for a good one.
 
 ```bash
-./scripts/git/github_backup.sh                                   # back up OWNER's repos into $PWD
-OWNER=someone OUTPUT_DIR=~/backups ./scripts/git/github_backup.sh
+./scripts/git/github_backup.sh                                   # back up the default OWNERS into $PWD
+OWNERS="someone some-org" OUTPUT_DIR=~/backups ./scripts/git/github_backup.sh
 ```
 
 Takes no arguments; `-h, --help` prints the usage and any other argument is
 rejected.
 
+Before cloning anything it validates `gh`'s access and aborts, listing every
+problem at once, if any check fails:
+- the token has the `repo` scope, plus `read:org` when an owner is an org
+  (skipped with a warning for fine-grained tokens, which don't report scopes);
+- every owner exists; for an org, your membership is `active`, and the org
+  doesn't block GitHub CLI (OAuth app restrictions) or require SAML SSO
+  authorisation; another user's account only warns (public repos only);
+- the public/private repo counts `gh repo list` returns match what GitHub
+  reports for each owner, so repos invisible to the token can't silently go
+  missing. (Your personal private count is only checked if GitHub exposes it
+  to the token.)
+
 Requires: `gh` (authenticated — `gh auth status`), `git`, `7z`, `jq`.
 
-Config: `OWNER` and `IGNORE_LIST` sit at the top of the script; everything else
-is an env var.
-- `OWNER` — GitHub user/org to back up. Defaults to `evictedcucumber`; override
-  with `OWNER=...` in the environment.
+Config: `DEFAULT_OWNERS` and `IGNORE_LIST` sit at the top of the script;
+everything else is an env var.
+- `OWNERS` — GitHub users/orgs to back up, space/newline separated. Defaults to
+  `evictedcucumber Zezura-Archive` (`DEFAULT_OWNERS` in the script). An owner
+  with no repos is warned about and skipped; a `gh repo list` failure for any
+  owner aborts the run. For an org's private repos, `gh` needs the `read:org`
+  scope (`gh auth refresh -s read:org`) and, if the org restricts OAuth apps,
+  GitHub CLI approved in the org's settings.
+- `OWNER` — single owner, honoured only when `OWNERS` is unset (backwards
+  compatibility).
 - `IGNORE_LIST` — `"owner/name"` entries to skip (edit the array in the script).
 - `GH_BACKUP_IGNORE` — env var; extra `"owner/name"` entries (space/newline
   separated) appended to `IGNORE_LIST`.
