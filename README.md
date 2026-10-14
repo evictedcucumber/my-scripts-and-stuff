@@ -232,6 +232,14 @@ duration of the run only, the script sets `GIT_CONFIG_*` env vars that rewrite
 use `gh auth git-credential` as the sole credential helper for `github.com`;
 your global git/gh config and the clones' saved remote URLs are left unchanged.
 
+The build phase also fetches cargo git dependencies on any repo whose fork
+synced cleanly from that fork rather than from upstream: for example,
+effectcraft's `filmcraft-*` crates come from `Zezura-Archive/filmcraft`, not
+`storytold/filmcraft`. This works the same way, through a run-only `insteadOf`
+rewrite plus `CARGO_NET_GIT_FETCH_WITH_CLI=true`, so no `Cargo.toml` or
+`Cargo.lock` is touched. The lockfile still pins the same commit, so the code
+built is identical; only where it is fetched from changes.
+
 Requires: `nix`, and `gh` authenticated (and allowed to push to and create
 releases on the `FORK_OWNER` org's repos).
 

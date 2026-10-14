@@ -80,7 +80,8 @@
 #                 (default: ~/.cache/craft-forks/craft-fonts).
 #
 # All git traffic to GitHub goes over HTTPS using gh's token (SSH remotes are
-# rewritten for the run), so no SSH key or passphrase is needed.
+# rewritten for the run), so no SSH key or passphrase is needed. Cargo git
+# dependencies on a repo with a fork in the list are fetched from that fork.
 #
 # Requirements: nix (flakes are enabled per-invocation) and an authenticated gh
 # login. Everything else - gh, git, jq, cargo (with the x86_64-pc-windows-msvc
@@ -824,6 +825,10 @@ SYNCED=()
 # are released.
 BUILT=()
 
+# "parent<TAB>fork" for each fork that synced cleanly; the build phase fetches
+# git dependencies on a parent from the fork instead.
+FORK_SOURCES=()
+
 # ---------------------------------------------------------------------------
 # Phase 1: clone and sync every repo
 # ---------------------------------------------------------------------------
@@ -882,6 +887,9 @@ for item in "${ITEMS[@]}"; do
 
   echo "Up to date: $dest ($branch)"
   SYNCED+=("$repo"$'\t'"$name"$'\t'"$dest"$'\t'"$branch")
+  if [[ "$is_fork" == true ]]; then
+    FORK_SOURCES+=("$parent"$'\t'"$repo")
+  fi
 done
 
 # ---------------------------------------------------------------------------
@@ -891,6 +899,26 @@ done
 if [[ "$BUILD" == true && ${#SYNCED[@]} -gt 0 ]]; then
   echo
   echo "Synced ${#SYNCED[@]} of ${#ITEMS[@]} repo(s); building..."
+fi
+
+# Git dependencies on a repo we hold a fork of (e.g. effectcraft's filmcraft-*
+# crates) are fetched from the fork, not upstream. A git URL rewrite (for this
+# run only, like the SSH one above) leaves every Cargo.toml/Cargo.lock as is,
+# so --locked still holds: the lockfile keeps the upstream URL and pinned rev,
+# and the fork, just synced from upstream, has that commit. cargo's built-in
+# libgit2 ignores GIT_CONFIG_* env vars, hence fetching with the git CLI.
+# insteadOf is a prefix match: it covers .../filmcraft.git, but would also
+# catch an unrelated upstream repo whose name starts with a fork's (.../filmcraft-x).
+if [[ "$BUILD" == true && ${#FORK_SOURCES[@]} -gt 0 ]]; then
+  export CARGO_NET_GIT_FETCH_WITH_CLI=true
+  for entry in "${FORK_SOURCES[@]}"; do
+    IFS=$'\t' read -r parent repo <<< "$entry"
+    echo "Fetching git dependencies on $parent from $repo."
+    export "GIT_CONFIG_KEY_$git_config_idx=url.https://github.com/$repo.insteadOf"
+    export "GIT_CONFIG_VALUE_$git_config_idx=https://github.com/$parent"
+    git_config_idx=$((git_config_idx + 1))
+  done
+  export GIT_CONFIG_COUNT="$git_config_idx"
 fi
 
 for entry in "${SYNCED[@]}"; do
