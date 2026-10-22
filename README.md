@@ -180,7 +180,8 @@ up the syncing.
    nothing is done.
 
 Repos with no binary named after the repo (checked with `cargo metadata`), such
-as **craft-fonts** — a font/library repo the apps build against — are synced
+as **craft-fonts** and **craft-libs** — the font and library repos the apps
+build against — are synced
 (steps 1–3) but not built or released. Non-fork repos in the list are just
 cloned/fetched and fast-forwarded on their default branch. A fork whose branch has diverged from upstream, a fork that is
 archived (read-only) on GitHub, or a local clone with diverged commits is
@@ -239,6 +240,15 @@ effectcraft's `filmcraft-*` crates come from `Zezura-Archive/filmcraft`, not
 rewrite plus `CARGO_NET_GIT_FETCH_WITH_CLI=true`, so no `Cargo.toml` or
 `Cargo.lock` is touched. The lockfile still pins the same commit, so the code
 built is identical; only where it is fetched from changes.
+
+**craft-libs** goes one step further, like craft-fonts: when
+[storytold/craft-libs](https://github.com/storytold/craft-libs) is in the star
+list (your fork, synced to `DEST_DIR/craft-libs`), its crates (`craft-ui`,
+`craft-docpath`, `craft-print`, ...) are fetched from that **local clone**
+(`file://` rewrite) instead of GitHub. Before each build, any craft-libs
+commit the repo's `Cargo.lock` pins that the clone lacks (e.g. one only on a
+deleted PR branch) is fetched into it from your fork first; if that fails the
+repo isn't built.
 
 Requires: `nix`, and `gh` authenticated (and allowed to push to and create
 releases on the `FORK_OWNER` org's repos).

@@ -27,6 +27,11 @@
 #      CRAFT_FONTS_DIR + CRAFT_FONTS_REQUIRED=1 like upstream's release builds,
 #      so the fonts are embedded (and a missing font is an error, not a
 #      silently font-less binary).
+#      If storytold/craft-libs is in the star list too (your fork, synced to
+#      DEST_DIR/craft-libs), cargo fetches the repos' craft-libs git
+#      dependencies from that local clone instead of GitHub; any commit a
+#      Cargo.lock pins that the clone lacks is fetched into it from the fork
+#      first.
 #      Windows icon/version resources are not embedded: the apps only pull in
 #      `winresource` on Windows hosts, so their build.rs skips it (with a
 #      warning) when cross-compiling.
@@ -38,8 +43,8 @@
 #      updated in place instead (tag moved to the built commit, assets and
 #      notes replaced); skipped if it already points at the built commit.
 #
-# Repos without such a binary (e.g. craft-fonts, a library/asset repo) are
-# synced but not built or released. Non-fork repos in the list are just
+# Repos without such a binary (e.g. craft-fonts or craft-libs, library/asset
+# repos) are synced but not built or released. Non-fork repos in the list are just
 # cloned/fetched and fast-forwarded on their default branch. Failures are collected per repo (and per build target) and
 # summarised at the end; the script exits 1 if anything failed.
 #
@@ -233,6 +238,12 @@ export RUSTC_WRAPPER="${RUSTC_WRAPPER-sccache}"
 # The repos' release builds embed fonts from this repo at a pinned commit.
 CRAFT_FONTS_REPO="storytold/craft-fonts"
 CRAFT_FONTS_CACHE="${CRAFT_FONTS_CACHE:-$HOME/.cache/craft-forks/craft-fonts}"
+
+# The repos' crates depend on this repo's crates as cargo git dependencies.
+# When it is in the star list, its synced clone serves those (CRAFT_LIBS_LOCAL,
+# set after phase 1).
+CRAFT_LIBS_REPO="storytold/craft-libs"
+CRAFT_LIBS_LOCAL=""
 
 # ---------------------------------------------------------------------------
 # Sanity checks
@@ -657,13 +668,49 @@ prepare_craft_fonts() {
 }
 
 # ---------------------------------------------------------------------------
+# Make sure the local craft-libs clone has every craft-libs commit a repo's
+# Cargo.lock pins, so cargo can fetch them from it.
+#
+#   prepare_craft_libs DIR
+#
+# Only used when CRAFT_LIBS_LOCAL is set. A pinned commit can be missing
+# locally if it was never on a branch the clone fetched (e.g. a deleted PR
+# branch); it is fetched from the fork, which GitHub serves every commit of the
+# fork network from. Such a commit has no ref, so a later `git gc` may prune it
+# and it is simply fetched again.
+# ---------------------------------------------------------------------------
+
+prepare_craft_libs() {
+  local lock="$1/Cargo.lock" line sha
+  [[ -f "$lock" ]] || return 0
+
+  local source_re='^source = "git\+https://github\.com/'"$CRAFT_LIBS_REPO"'(\.git)?[?#].*#([0-9a-f]{40})"$'
+  local shas=()
+  while IFS= read -r line; do
+    if [[ "$line" =~ $source_re ]]; then
+      shas+=("${BASH_REMATCH[2]}")
+    fi
+  done < "$lock"
+
+  local missing=()
+  for sha in "${shas[@]}"; do
+    git -C "$CRAFT_LIBS_LOCAL" cat-file -e "$sha^{commit}" 2>/dev/null || missing+=("$sha")
+  done
+  [[ ${#missing[@]} -gt 0 ]] || return 0
+
+  mapfile -t missing < <(printf '%s\n' "${missing[@]}" | sort -u)
+  echo "Fetching ${#missing[@]} pinned $CRAFT_LIBS_REPO commit(s) into $CRAFT_LIBS_LOCAL..."
+  git -C "$CRAFT_LIBS_LOCAL" fetch --quiet origin "${missing[@]}" || return 1
+}
+
+# ---------------------------------------------------------------------------
 # Whether a repo has a main binary to build: package NAME with a bin target
 # NAME.
 #
 #   has_main_bin DIR NAME
 #
 # Returns 0 if it does, 1 if not (no Cargo.toml, or e.g. a library-only crate
-# like craft-fonts), 2 if cargo can't read the manifest.
+# like craft-fonts/craft-libs), 2 if cargo can't read the manifest.
 # ---------------------------------------------------------------------------
 
 has_main_bin() {
@@ -887,7 +934,10 @@ for item in "${ITEMS[@]}"; do
 
   echo "Up to date: $dest ($branch)"
   SYNCED+=("$repo"$'\t'"$name"$'\t'"$dest"$'\t'"$branch")
-  if [[ "$is_fork" == true ]]; then
+  # craft-libs is served from this clone instead of its fork on GitHub.
+  if [[ "${parent:-$repo}" == "$CRAFT_LIBS_REPO" ]]; then
+    CRAFT_LIBS_LOCAL="$dest"
+  elif [[ "$is_fork" == true ]]; then
     FORK_SOURCES+=("$parent"$'\t'"$repo")
   fi
 done
@@ -921,6 +971,21 @@ if [[ "$BUILD" == true && ${#FORK_SOURCES[@]} -gt 0 ]]; then
   export GIT_CONFIG_COUNT="$git_config_idx"
 fi
 
+# Likewise craft-libs, but from its synced clone in DEST_DIR (like craft-fonts),
+# so cargo doesn't download a second copy. The .git form is listed too: git
+# applies the longest matching insteadOf, which would otherwise turn
+# .../craft-libs.git into a nonexistent .../craft-libs.git directory.
+if [[ "$BUILD" == true && -n "$CRAFT_LIBS_LOCAL" ]]; then
+  export CARGO_NET_GIT_FETCH_WITH_CLI=true
+  echo "Fetching git dependencies on $CRAFT_LIBS_REPO from $CRAFT_LIBS_LOCAL."
+  for suffix in .git ""; do
+    export "GIT_CONFIG_KEY_$git_config_idx=url.file://$CRAFT_LIBS_LOCAL.insteadOf"
+    export "GIT_CONFIG_VALUE_$git_config_idx=https://github.com/$CRAFT_LIBS_REPO$suffix"
+    git_config_idx=$((git_config_idx + 1))
+  done
+  export GIT_CONFIG_COUNT="$git_config_idx"
+fi
+
 for entry in "${SYNCED[@]}"; do
   [[ "$BUILD" == true ]] || break
 
@@ -936,8 +1001,9 @@ for entry in "${SYNCED[@]}"; do
     continue
   fi
 
-  # Repos with no binary of their own (e.g. craft-fonts, a font/library repo
-  # the others build against) are only synced: nothing to build or release.
+  # Repos with no binary of their own (e.g. craft-fonts or craft-libs, font and
+  # library repos the others build against) are only synced: nothing to build
+  # or release.
   bin_status=0
   has_main_bin "$dest" "$name" || bin_status=$?
   if [[ "$bin_status" -eq 1 ]]; then
@@ -964,6 +1030,12 @@ for entry in "${SYNCED[@]}"; do
       continue
     fi
     export CRAFT_FONTS_DIR="$CRAFT_FONTS_CACHE" CRAFT_FONTS_REQUIRED=1
+  fi
+
+  if [[ -n "$CRAFT_LIBS_LOCAL" ]] && ! prepare_craft_libs "$dest"; then
+    echo "WARNING: failed to fetch the $CRAFT_LIBS_REPO commits $repo pins; not building it." >&2
+    FAILED+=("$repo (build: craft-libs)")
+    continue
   fi
 
   # -fno-{function,data}-sections: the cc crate adds -ffunction-sections
