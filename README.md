@@ -194,6 +194,8 @@ each build target) is listed at the end and the script **exits 1**.
 ./scripts/git/sync_craft_forks/sync_craft_forks.sh --build      # sync + build, no releases
 ./scripts/git/sync_craft_forks/sync_craft_forks.sh --release    # same as no mode
 ./scripts/git/sync_craft_forks/sync_craft_forks.sh --clean      # wipe cargo target dir + sccache cache
+./scripts/git/sync_craft_forks/sync_craft_forks.sh -j 8         # sync 8 repos at a time
+./scripts/git/sync_craft_forks/sync_craft_forks.sh --build --only filmcraft,effectcraft
 ./scripts/git/sync_craft_forks/sync_craft_forks.sh ~/archive    # custom source destination
 STAR_LIST="Other List" ./scripts/git/sync_craft_forks/sync_craft_forks.sh
 ```
@@ -213,6 +215,17 @@ STAR_LIST="Other List" ./scripts/git/sync_craft_forks/sync_craft_forks.sh
   `CRAFT_FONTS_CACHE` are kept, and no `gh` login is needed. Takes no other
   options or `DEST_DIR`.
 - Only one of `--sync`/`--build`/`--release`/`--clean` may be given.
+- `--only REPO[,REPO...]` — process only these repos of the star list
+  (repeatable, comma-separated). Each is matched case-insensitively against a
+  repo's name, its `owner/name`, or a fork's upstream `owner/name`; a name that
+  matches nothing is an error, listing the repos in the list. Unselected repos
+  aren't synced, built or released, but their existing clones and forks still
+  serve the selected repos' git dependencies (craft-libs, forked crates) and
+  craft-fonts, as in a full run.
+- `-j, --jobs N` — sync up to N repos in parallel (default 1). Only the sync
+  phase (steps 1-3) runs in parallel: builds share the cargo target dir and
+  run one at a time, as do releases. With N > 1 each repo's sync output is
+  buffered and printed as one block when that repo finishes.
 - `STAR_LIST` — env var; the star list name to read (exact match).
 - `FORK_OWNER` — env var; user/org that owns the forks, the only owner whose
   repos get releases (default `Zezura-Archive`, matched case-insensitively).

@@ -49,7 +49,8 @@
 # summarised at the end; the script exits 1 if anything failed.
 #
 # Usage:
-#   sync_craft_forks.sh [--sync|--build|--release] [-f|--force] [DEST_DIR]
+#   sync_craft_forks.sh [--sync|--build|--release] [-f|--force]
+#                         [--only REPO[,REPO...]] [-j|--jobs N] [DEST_DIR]
 #   sync_craft_forks.sh --clean
 #   sync_craft_forks.sh -h|--help
 #
@@ -69,6 +70,17 @@
 #                 no sync, build or release, and DEST_DIR, BUILD_DIR and
 #                 CRAFT_FONTS_CACHE are left alone. Needs no gh login.
 #   Only one of --sync/--build/--release/--clean may be given.
+#   --only REPO[,REPO...]
+#                 Only process these repos of the star list (repeatable). Each
+#                 REPO is matched, case-insensitively, against a repo's name,
+#                 its owner/name, or a fork's upstream owner/name; one matching
+#                 nothing is an error. Unselected repos are not synced, but
+#                 their existing clones/forks still serve the selected repos'
+#                 git dependencies (craft-libs, forked crates) and craft-fonts.
+#   -j, --jobs N  Sync up to N repos at once (default 1). Only steps 1-3 run in
+#                 parallel; builds and releases stay one at a time, as they
+#                 share the cargo target dir. With N > 1 each repo's sync
+#                 output is printed in one block when it finishes.
 #
 # Environment:
 #   STAR_LIST     Name of the star list to read (default: "zezura-archive-craft").
@@ -112,7 +124,8 @@ ORIG_ARGS=("$@")
 
 usage() {
   cat <<'EOF'
-Usage: sync_craft_forks.sh [--sync|--build|--release] [-f|--force] [DEST_DIR]
+Usage: sync_craft_forks.sh [--sync|--build|--release] [-f|--force]
+                           [--only REPO[,REPO...]] [-j|--jobs N] [DEST_DIR]
        sync_craft_forks.sh --clean
        sync_craft_forks.sh -h|--help
 
@@ -134,6 +147,10 @@ Modes (at most one; default --release):
 Options:
   -f, --force   Hard-reset (GitHub and local) instead of fast-forward only.
                 Discards fork commits that upstream does not have.
+      --only REPO[,REPO...]
+                Only process these repos (name, owner/name, or a fork's
+                upstream owner/name; repeatable).
+  -j, --jobs N  Sync up to N repos in parallel (default 1); builds stay serial.
   -h, --help    Show this help.
 
 Environment:
@@ -155,6 +172,8 @@ EOF
 
 FORCE=false
 MODE=""
+ONLY=()
+JOBS=1
 
 set_mode() {
   if [[ -n "$MODE" && "$MODE" != "$1" ]]; then
@@ -177,6 +196,27 @@ while [[ $# -gt 0 ]]; do
       ;;
     --sync | --build | --release | --clean)
       set_mode "${1#--}"
+      shift
+      ;;
+    --only | -j | --jobs)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: $1 needs a value." >&2
+        usage >&2
+        exit 1
+      fi
+      if [[ "$1" == --only ]]; then
+        ONLY+=("$2")
+      else
+        JOBS="$2"
+      fi
+      shift 2
+      ;;
+    --only=*)
+      ONLY+=("${1#*=}")
+      shift
+      ;;
+    --jobs=*)
+      JOBS="${1#*=}"
       shift
       ;;
     --)
@@ -204,7 +244,27 @@ case "$MODE" in
   release) BUILD=true RELEASE=true ;;
 esac
 
-if [[ "$MODE" == clean && ( "$FORCE" == true || $# -gt 0 ) ]]; then
+if [[ ! "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Error: --jobs needs a positive integer, got '$JOBS'." >&2
+  exit 1
+fi
+
+# Split comma-separated --only values; drop whitespace and empty entries.
+ONLY_NAMES=()
+for value in "${ONLY[@]}"; do
+  IFS=',' read -r -a names <<< "$value"
+  for n in "${names[@]}"; do
+    n="${n//[[:space:]]/}"
+    [[ -n "$n" ]] && ONLY_NAMES+=("$n")
+  done
+done
+if [[ ${#ONLY[@]} -gt 0 && ${#ONLY_NAMES[@]} -eq 0 ]]; then
+  echo "Error: --only needs at least one repo name." >&2
+  exit 1
+fi
+
+if [[ "$MODE" == clean &&
+  ( "$FORCE" == true || ${#ONLY[@]} -gt 0 || "$JOBS" != 1 || $# -gt 0 ) ]]; then
   echo "Error: --clean takes no other options or arguments." >&2
   usage >&2
   exit 1
@@ -532,7 +592,50 @@ if [[ ${#ITEMS[@]} -eq 1 && -z "${ITEMS[0]}" ]]; then
   ITEMS=()
 fi
 
-echo "Found ${#ITEMS[@]} repo(s) in '$STAR_LIST'. Syncing into $DEST_DIR"
+echo "Found ${#ITEMS[@]} repo(s) in '$STAR_LIST'."
+
+# --only: narrow ITEMS to the matching repos. ALL_ITEMS keeps the full list for
+# the unselected repos' clones/forks, which the builds still fetch from.
+ALL_ITEMS=("${ITEMS[@]}")
+declare -A SELECTED=()
+if [[ ${#ONLY_NAMES[@]} -gt 0 ]]; then
+  declare -A matched=()
+  ITEMS=()
+  for item in "${ALL_ITEMS[@]}"; do
+    IFS=$'\t' read -r repo _ _ _ _ parent <<< "$item"
+    hit=false
+    for want in "${ONLY_NAMES[@]}"; do
+      want_lc="${want,,}"
+      name_lc="${repo#*/}"
+      name_lc="${name_lc,,}"
+      if [[ "$want_lc" == "${repo,,}" || "$want_lc" == "$name_lc" ||
+        ( -n "$parent" && "$want_lc" == "${parent,,}" ) ]]; then
+        matched[$want]=1
+        hit=true
+      fi
+    done
+    if [[ "$hit" == true ]]; then
+      ITEMS+=("$item")
+      SELECTED[$repo]=1
+    fi
+  done
+
+  unmatched=()
+  for want in "${ONLY_NAMES[@]}"; do
+    [[ -n "${matched[$want]:-}" ]] || unmatched+=("$want")
+  done
+  if [[ ${#unmatched[@]} -gt 0 ]]; then
+    echo "Error: --only matched nothing in '$STAR_LIST' for: ${unmatched[*]}" >&2
+    echo "Repos in the list:" >&2
+    for item in "${ALL_ITEMS[@]}"; do
+      printf '  %s\n' "${item%%$'\t'*}" >&2
+    done
+    exit 1
+  fi
+  echo "Selected ${#ITEMS[@]} of them with --only."
+fi
+
+echo "Syncing ${#ITEMS[@]} repo(s) into $DEST_DIR"
 
 if [[ ${#ITEMS[@]} -eq 0 ]]; then
   echo "Nothing to do."
@@ -942,9 +1045,17 @@ FORK_SOURCES=()
 
 # ---------------------------------------------------------------------------
 # Phase 1: clone and sync every repo
+#
+#   sync_repo ITEM RESULT
+#
+# Syncs one ITEMS entry (steps 1-3), then writes "ok" to the file RESULT, or
+# the FAILED entry describing what went wrong. Runs either in the foreground
+# (-j 1) or as a background job, so it reports through RESULT rather than the
+# script's arrays; a missing RESULT means the job died before finishing.
 # ---------------------------------------------------------------------------
 
-for item in "${ITEMS[@]}"; do
+sync_repo() {
+  local item="$1" result="$2" repo is_fork is_archived branch parent name dest
   IFS=$'\t' read -r repo is_fork is_archived _ branch parent <<< "$item"
   name="${repo#*/}"
   dest="${DEST_DIR}/${name}"
@@ -954,23 +1065,23 @@ for item in "${ITEMS[@]}"; do
 
   if [[ -z "$branch" ]]; then
     echo "WARNING: $repo has no default branch (empty repo?); skipping." >&2
-    FAILED+=("$repo (no default branch)")
-    continue
+    echo "$repo (no default branch)" > "$result"
+    return 1
   fi
 
   # 1. Sync the fork on GitHub from its parent.
   if [[ "$is_fork" == true ]]; then
     if [[ "$is_archived" == true ]]; then
       echo "WARNING: $repo is archived (read-only) on GitHub; cannot sync it from $parent." >&2
-      FAILED+=("$repo (archived on GitHub)")
-      continue
+      echo "$repo (archived on GitHub)" > "$result"
+      return 1
     fi
 
     echo "Syncing $repo:$branch from $parent:$branch on GitHub..."
     if ! gh repo sync "$repo" --branch "$branch" "${SYNC_ARGS[@]}"; then
       echo "WARNING: failed to sync $repo from $parent (diverged? retry with --force)." >&2
-      FAILED+=("$repo (GitHub sync)")
-      continue
+      echo "$repo (GitHub sync)" > "$result"
+      return 1
     fi
   fi
 
@@ -979,28 +1090,109 @@ for item in "${ITEMS[@]}"; do
     echo "Cloning into $dest..."
     if ! gh repo clone "$repo" "$dest"; then
       echo "WARNING: failed to clone $repo" >&2
-      FAILED+=("$repo (clone)")
+      echo "$repo (clone)" > "$result"
       rm -rf -- "$dest"
-      continue
+      return 1
     fi
   elif [[ ! -d "$dest/.git" ]]; then
     echo "WARNING: $dest exists but is not a git repository; skipping." >&2
-    FAILED+=("$repo (not a git repo: $dest)")
-    continue
+    echo "$repo (not a git repo: $dest)" > "$result"
+    return 1
   fi
 
   # 3. Bring the local branch up to date with GitHub.
   if ! update_local "$dest" "$branch"; then
     echo "WARNING: failed to update local $branch in $dest" >&2
-    FAILED+=("$repo (local update)")
-    continue
+    echo "$repo (local update)" > "$result"
+    return 1
   fi
 
   echo "Up to date: $dest ($branch)"
-  SYNCED+=("$repo"$'\t'"$name"$'\t'"$dest"$'\t'"$branch")
+  echo ok > "$result"
+}
+
+# Per-repo results (and, with -j > 1, buffered output), named by ITEMS index.
+WORK_DIR="$(mktemp -d)"
+cleanup() {
+  local pids=()
+  mapfile -t pids < <(jobs -pr)
+  if [[ ${#pids[@]} -gt 0 ]]; then
+    kill "${pids[@]}" 2>/dev/null || true
+  fi
+  rm -rf -- "$WORK_DIR"
+}
+trap cleanup EXIT
+
+# Background job pid -> ITEMS index, for printing its output once it's done.
+declare -A SYNC_JOBS=()
+running=0
+
+# Wait for any one sync job, then print its buffered output.
+finish_sync_job() {
+  local pid=""
+  wait -n -p pid || true
+  if [[ -z "$pid" ]]; then
+    running=0
+    return
+  fi
+  cat -- "$WORK_DIR/${SYNC_JOBS[$pid]}.log"
+  unset "SYNC_JOBS[$pid]"
+  running=$((running - 1))
+}
+
+if [[ "$JOBS" -eq 1 ]]; then
+  for i in "${!ITEMS[@]}"; do
+    sync_repo "${ITEMS[$i]}" "$WORK_DIR/$i" || true
+  done
+else
+  echo "Syncing up to $JOBS repos at a time; each repo's output appears when it finishes."
+  for i in "${!ITEMS[@]}"; do
+    while [[ "$running" -ge "$JOBS" ]]; do
+      finish_sync_job
+    done
+    sync_repo "${ITEMS[$i]}" "$WORK_DIR/$i" > "$WORK_DIR/$i.log" 2>&1 &
+    SYNC_JOBS[$!]="$i"
+    running=$((running + 1))
+  done
+  while [[ "$running" -gt 0 ]]; do
+    finish_sync_job
+  done
+fi
+
+# Collect the results in star-list order.
+for i in "${!ITEMS[@]}"; do
+  IFS=$'\t' read -r repo is_fork _ _ branch parent <<< "${ITEMS[$i]}"
+  name="${repo#*/}"
+  result=""
+  if [[ -f "$WORK_DIR/$i" ]]; then
+    result="$(< "$WORK_DIR/$i")"
+  fi
+
+  if [[ "$result" != ok ]]; then
+    FAILED+=("${result:-$repo (sync: aborted)}")
+    continue
+  fi
+
+  SYNCED+=("$repo"$'\t'"$name"$'\t'"$DEST_DIR/$name"$'\t'"$branch")
   # craft-libs is served from this clone instead of its fork on GitHub.
   if [[ "${parent:-$repo}" == "$CRAFT_LIBS_REPO" ]]; then
-    CRAFT_LIBS_LOCAL="$dest"
+    CRAFT_LIBS_LOCAL="$DEST_DIR/$name"
+  elif [[ "$is_fork" == true ]]; then
+    FORK_SOURCES+=("$parent"$'\t'"$repo")
+  fi
+done
+
+# Repos left out by --only weren't synced this run, but their existing
+# craft-libs clone and forks still serve the selected repos' git dependencies
+# (prepare_craft_libs fetches any pinned commit the clone lacks).
+for item in "${ALL_ITEMS[@]}"; do
+  IFS=$'\t' read -r repo is_fork _ _ _ parent <<< "$item"
+  [[ ${#ONLY_NAMES[@]} -gt 0 && -z "${SELECTED[$repo]:-}" ]] || continue
+  name="${repo#*/}"
+  if [[ "${parent:-$repo}" == "$CRAFT_LIBS_REPO" ]]; then
+    if [[ -z "$CRAFT_LIBS_LOCAL" && -d "$DEST_DIR/$name/.git" ]]; then
+      CRAFT_LIBS_LOCAL="$DEST_DIR/$name"
+    fi
   elif [[ "$is_fork" == true ]]; then
     FORK_SOURCES+=("$parent"$'\t'"$repo")
   fi
