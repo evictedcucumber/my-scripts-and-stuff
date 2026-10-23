@@ -189,9 +189,11 @@ reported as failed rather than overwritten. Each failed step (sync, clone,
 each build target) is listed at the end and the script **exits 1**.
 
 ```bash
-./scripts/git/sync_craft_forks/sync_craft_forks.sh              # sync + build
-./scripts/git/sync_craft_forks/sync_craft_forks.sh --no-build   # sync only
-./scripts/git/sync_craft_forks/sync_craft_forks.sh --no-release # sync + build, no releases
+./scripts/git/sync_craft_forks/sync_craft_forks.sh              # sync + build + release
+./scripts/git/sync_craft_forks/sync_craft_forks.sh --sync       # sync only
+./scripts/git/sync_craft_forks/sync_craft_forks.sh --build      # sync + build, no releases
+./scripts/git/sync_craft_forks/sync_craft_forks.sh --release    # same as no mode
+./scripts/git/sync_craft_forks/sync_craft_forks.sh --clean      # wipe cargo target dir + sccache cache
 ./scripts/git/sync_craft_forks/sync_craft_forks.sh ~/archive    # custom source destination
 STAR_LIST="Other List" ./scripts/git/sync_craft_forks/sync_craft_forks.sh
 ```
@@ -201,8 +203,16 @@ STAR_LIST="Other List" ./scripts/git/sync_craft_forks/sync_craft_forks.sh
 - `-f, --force` — hard-reset instead of fast-forwarding, on GitHub
   (`gh repo sync --force`) and locally (`git reset --hard` / forced ref update).
   **Discards** fork commits that upstream does not have.
-- `--no-build` — sync only; skip steps 4 and 5.
-- `--no-release` — sync and build; skip step 5.
+- `--sync` — sync only (steps 1-3).
+- `--build` — sync, then build (steps 1-4); no releases.
+- `--release` — sync, build, then release (steps 1-5); the default when no
+  mode is given.
+- `--clean` — delete the build caches and do nothing else: stops the sccache
+  server, then removes `CARGO_TARGET_DIR` and `SCCACHE_DIR` (default
+  `~/.cache/sccache`). Sources (`DEST_DIR`), binaries (`BUILD_DIR`) and
+  `CRAFT_FONTS_CACHE` are kept, and no `gh` login is needed. Takes no other
+  options or `DEST_DIR`.
+- Only one of `--sync`/`--build`/`--release`/`--clean` may be given.
 - `STAR_LIST` — env var; the star list name to read (exact match).
 - `FORK_OWNER` — env var; user/org that owns the forks, the only owner whose
   repos get releases (default `Zezura-Archive`, matched case-insensitively).

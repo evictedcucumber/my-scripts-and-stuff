@@ -49,8 +49,9 @@
 # summarised at the end; the script exits 1 if anything failed.
 #
 # Usage:
-#   sync_craft_forks.sh [-f|--force] [--no-build] [--no-release] [-h|--help]
-#                         [DEST_DIR]
+#   sync_craft_forks.sh [--sync|--build|--release] [-f|--force] [DEST_DIR]
+#   sync_craft_forks.sh --clean
+#   sync_craft_forks.sh -h|--help
 #
 # Arguments:
 #   DEST_DIR      Where repos are cloned (default: ~/repos/craft-forks).
@@ -60,8 +61,14 @@
 #   -f, --force   Hard-reset instead of fast-forwarding, both on GitHub
 #                 (`gh repo sync --force`) and locally (`git reset --hard`).
 #                 Discards any commits on the fork's branch that upstream lacks.
-#   --no-build    Only sync; skip steps 4 and 5.
-#   --no-release  Sync and build; skip step 5.
+#   --sync        Only sync (steps 1-3).
+#   --build       Sync, then build (steps 1-4).
+#   --release     Sync, build, then release (steps 1-5). The default.
+#   --clean       Delete the build caches - CARGO_TARGET_DIR and sccache's
+#                 SCCACHE_DIR (after stopping its server) - and nothing else:
+#                 no sync, build or release, and DEST_DIR, BUILD_DIR and
+#                 CRAFT_FONTS_CACHE are left alone. Needs no gh login.
+#   Only one of --sync/--build/--release/--clean may be given.
 #
 # Environment:
 #   STAR_LIST     Name of the star list to read (default: "zezura-archive-craft").
@@ -105,8 +112,9 @@ ORIG_ARGS=("$@")
 
 usage() {
   cat <<'EOF'
-Usage: sync_craft_forks.sh [-f|--force] [--no-build] [--no-release] [-h|--help]
-                             [DEST_DIR]
+Usage: sync_craft_forks.sh [--sync|--build|--release] [-f|--force] [DEST_DIR]
+       sync_craft_forks.sh --clean
+       sync_craft_forks.sh -h|--help
 
 Clone/sync every repo in a GitHub star list into DEST_DIR, syncing forks to
 their upstream default branch on GitHub first, then release-build each repo's
@@ -117,13 +125,15 @@ of that version is updated in place) on each repo you own.
 Arguments:
   DEST_DIR      Where repos are cloned (default: ~/repos/craft-forks).
 
+Modes (at most one; default --release):
+      --sync    Only sync.
+      --build   Sync, then build.
+      --release Sync, build, then release.
+      --clean   Delete CARGO_TARGET_DIR and SCCACHE_DIR (build caches) only.
+
 Options:
   -f, --force   Hard-reset (GitHub and local) instead of fast-forward only.
                 Discards fork commits that upstream does not have.
-      --no-build
-                Only sync; don't build or release.
-      --no-release
-                Sync and build; don't create releases.
   -h, --help    Show this help.
 
 Environment:
@@ -134,6 +144,7 @@ Environment:
   CARGO_TARGET_DIR
                 Shared cargo target dir (default: ~/.cache/craft-forks/target).
   RUSTC_WRAPPER Compiler wrapper (default: sccache; empty to disable).
+  SCCACHE_DIR   sccache's cache, removed by --clean (default: ~/.cache/sccache).
   CRAFT_FONTS_CACHE
                 craft-fonts clone for builds that embed it
                 (default: ~/.cache/craft-forks/craft-fonts).
@@ -143,8 +154,16 @@ EOF
 }
 
 FORCE=false
-BUILD=true
-RELEASE=true
+MODE=""
+
+set_mode() {
+  if [[ -n "$MODE" && "$MODE" != "$1" ]]; then
+    echo "Error: --$MODE and --$1 can't be combined." >&2
+    usage >&2
+    exit 1
+  fi
+  MODE="$1"
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -156,12 +175,8 @@ while [[ $# -gt 0 ]]; do
       FORCE=true
       shift
       ;;
-    --no-build)
-      BUILD=false
-      shift
-      ;;
-    --no-release)
-      RELEASE=false
+    --sync | --build | --release | --clean)
+      set_mode "${1#--}"
       shift
       ;;
     --)
@@ -179,8 +194,21 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Releases publish the builds, so there is nothing to release without them.
-[[ "$BUILD" == true ]] || RELEASE=false
+# Each mode runs every phase before its own: releases publish the builds, and
+# builds use the synced sources.
+MODE="${MODE:-release}"
+BUILD=false
+RELEASE=false
+case "$MODE" in
+  build) BUILD=true ;;
+  release) BUILD=true RELEASE=true ;;
+esac
+
+if [[ "$MODE" == clean && ( "$FORCE" == true || $# -gt 0 ) ]]; then
+  echo "Error: --clean takes no other options or arguments." >&2
+  usage >&2
+  exit 1
+fi
 
 if [[ $# -gt 1 ]]; then
   echo "Error: unexpected argument: $2 (only one DEST_DIR is accepted)." >&2
@@ -244,6 +272,42 @@ CRAFT_FONTS_CACHE="${CRAFT_FONTS_CACHE:-$HOME/.cache/craft-forks/craft-fonts}"
 # set after phase 1).
 CRAFT_LIBS_REPO="storytold/craft-libs"
 CRAFT_LIBS_LOCAL=""
+
+# ---------------------------------------------------------------------------
+# --clean: delete the build caches and stop
+# ---------------------------------------------------------------------------
+
+# Refuses paths whose deletion would take more than a cache with it.
+remove_cache_dir() {
+  local label="$1" dir="$2" resolved
+  if [[ ! -e "$dir" ]]; then
+    echo "No $label at $dir; nothing to remove."
+    return 0
+  fi
+  resolved="$(realpath -- "$dir")" || return 1
+  if [[ "$resolved" == / || "$resolved" == "$(realpath -- "$HOME")" ]]; then
+    echo "Error: refusing to remove $label at $resolved." >&2
+    return 1
+  fi
+  echo "Removing $label: $resolved"
+  rm -rf -- "$resolved"
+}
+
+if [[ "$MODE" == clean ]]; then
+  # sccache's own default; the server holds the cache open, so stop it first
+  # (it errors if it isn't running, which is fine).
+  SCCACHE_DIR="${SCCACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/sccache}"
+  if command -v sccache >/dev/null 2>&1; then
+    sccache --stop-server >/dev/null 2>&1 || true
+  fi
+
+  CLEAN_FAILED=false
+  remove_cache_dir "cargo target dir" "$CARGO_TARGET_DIR" || CLEAN_FAILED=true
+  remove_cache_dir "sccache cache" "$SCCACHE_DIR" || CLEAN_FAILED=true
+  [[ "$CLEAN_FAILED" == false ]] || exit 1
+  echo "Build caches cleaned."
+  exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # Sanity checks
