@@ -27,6 +27,7 @@ scripts/
     attach_yubikey.ps1                 # attaches a YubiKey to WSL via usbipd-win
     copy_to_downloads.sh               # copies a WSL file/dir to the Windows user's Downloads folder
     register_yubikey_attach_task.ps1   # registers a Scheduled Task that runs attach_yubikey.ps1 on USB connect
+    yubikey_toggle.sh                  # manually toggles a YubiKey between Windows and WSL via usbipd-win (default: toggle)
 ```
 
 New scripts go in `scripts/<category>/`, named `snake_case.sh` (or `snake_case.ps1`

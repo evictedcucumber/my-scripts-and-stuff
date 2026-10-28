@@ -534,6 +534,10 @@ autodetection (not needed when `--dest` / `WIN_DOWNLOADS_DIR` is given).
 
 ## scripts/wsl/attach_yubikey.ps1
 
+> **Superseded** by `yubikey_toggle.sh` for manual toggling. The auto-attach task
+> causes a freeze on insert and keeps the key from Windows whenever WSL is
+> running. Remove it with `register_yubikey_attach_task.ps1 -Remove` (elevated).
+
 Windows-side helper (not run from WSL/bash) that finds a connected YubiKey via
 `usbipd list` (matched on VID:PID `1050:0407`) and attaches it to WSL with
 `usbipd attach --wsl --busid <id>`. Skips the attach if the device is already
@@ -552,6 +556,10 @@ replug or reboot — not scheduled or hooked into anything automatically. To
 automate this, see `register_yubikey_attach_task.ps1` below.
 
 ## scripts/wsl/register_yubikey_attach_task.ps1
+
+> **Superseded** by `yubikey_toggle.sh` for manual toggling. The auto-attach task
+> causes a freeze on insert and keeps the key from Windows whenever WSL is
+> running. Remove it with `register_yubikey_attach_task.ps1 -Remove` (elevated).
 
 Windows-side, run once (and re-run any time to update): idempotently registers a
 Scheduled Task (`AttachYubiKeyToWSL`) that runs `attach_yubikey.ps1` whenever any
@@ -596,6 +604,42 @@ Requires: Windows PowerShell 5.1+, Windows Task Scheduler (`ScheduledTasks`
 module, built in), run from an elevated PowerShell prompt. Expects `attach_yubikey.ps1` to already be deployed
 at `%USERPROFILE%\Documents\Scripts\attach_yubikey.ps1` — copy it there before
 running this script.
+
+## scripts/wsl/yubikey_toggle.sh
+
+WSL-side script that manually toggles a YubiKey (VID:PID `1050:0407`) between
+Windows and WSL via `usbipd-win`. With no arguments it toggles: attached to WSL
+becomes detached (back to Windows), otherwise it attaches to WSL. After each
+change it re-reads `usbipd state` and confirms the result.
+
+```bash
+./scripts/wsl/yubikey_toggle.sh             # toggle
+./scripts/wsl/yubikey_toggle.sh --wsl       # attach to WSL
+./scripts/wsl/yubikey_toggle.sh --windows   # detach back to Windows
+./scripts/wsl/yubikey_toggle.sh --status    # WSL / Windows / not connected
+```
+
+- `--wsl`, `attach` — attach to WSL (no-op if already attached).
+- `--windows`, `detach` — detach back to Windows (no-op if not attached).
+- `--status` — print where the key is.
+- `-h`, `--help` — show help.
+- `USBIPD` — env var; path to `usbipd.exe` (default
+  `/mnt/c/Program Files/usbipd-win/usbipd.exe`).
+- `YUBIKEY_VIDPID` — env var; VID:PID of the key (default `1050:0407`).
+
+The first attach needs `usbipd bind`, which requires Administrator. The script
+runs it through `powershell.exe` with elevation, so you get one UAC prompt,
+one-time (the share persists). Errors out with "not connected" if the key is
+not plugged in.
+
+The key is exclusive: while it is attached to WSL, Windows cannot use it. The
+brief freeze happens at toggle time (driver swap) instead of on every insert.
+If the old `AttachYubiKeyToWSL` scheduled task is still registered, remove it
+(`register_yubikey_attach_task.ps1 -Remove`, elevated) or it will keep
+auto-attaching on insert.
+
+Requires: [usbipd-win](https://github.com/dorssel/usbipd-win) 4+ on Windows,
+`jq`, WSL2 with Windows interop (`wslpath`, `powershell.exe`).
 
 ## configs/windows_sandbox/windows_sandbox.wsb
 
