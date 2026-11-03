@@ -326,13 +326,15 @@ hours — the script says so and carries on).
 
 **Each step runs in its own console window.** The orchestrator re-invokes the
 script with an internal `-RunStep <name>` per step, polls for it, and reads a
-small JSON result back from a temp run directory (path printed at the start and
+small JSON result back from a run directory (path printed at the start and
 end of the run). That keeps each step's noisy output — winget's table redraws,
 the DISM progress bar, `Optimize-Volume -Verbose` — in a separate window and a
 per-step `output.log`, leaving the orchestrator window a clean
 one-line-per-step progress list. A step window auto-closes a few seconds after
 its step finishes, pass or fail — nothing waits for a keypress — and the run
-directory (`%TEMP%\windows_maintenance_<timestamp>\<Step>\`) is kept afterward.
+directory (`%LOCALAPPDATA%\windows_maintenance\runs\<timestamp>\<Step>\`) is kept
+afterward. It isn't under `%TEMP%`, where a later run's Disk Cleanup would empty
+it. The newest 10 run directories are kept; older ones are deleted at startup.
 Console QuickEdit is switched off in step windows so a stray click can't freeze
 them. (`Start-Transcript` on
 Windows PowerShell 5.1 may not capture native-EXE output in full — the live
@@ -407,7 +409,11 @@ each starting when the previous one has fully finished:
    (scans the component store and repairs it only if damaged), then
    `sfc /scannow`. The sfc outcome is read from the `[SR]` entries in `CBS.log`
    rather than its localised console text; anything it can't determine is a
-   `WARN`, never a silent "clean". Unrepairable corruption is a `FAIL`. Runs
+   `WARN`, never a silent "clean". Unrepairable corruption or a failed
+   `RestoreHealth` is a `FAIL` (sfc passing doesn't clear the component store),
+   and a DISM failure saves the end of `dism.log` as `dism_tail.log` in the
+   step's folder. Repairing from an ISO is left to you, because the source must
+   match the exact build and edition. Runs
    before Disk Cleanup because the repair needs the component store intact.
 5. **Disk Cleanup (all fixed drives) + component store** — writes
    `StateFlags<profile>` for every Disk Cleanup handler under
@@ -418,6 +424,9 @@ each starting when the previous one has fully finished:
    waits for it, then `DISM /Online /Cleanup-Image /StartComponentCleanup` to
    trim WinSxS, and reports the free-space change per drive. cleanmgr runs
    against every fixed drive, not just C:, and **this empties the Recycle Bin**.
+   If the integrity step failed or left no result, the component store isn't
+   known to be healthy, so the DISM pass and the `Update Cleanup` handler are
+   skipped and the step reports `WARN`.
    The step continues (DISM only) if `cleanmgr.exe` is absent (Server SKUs).
 6. **WSL disk compaction** — WSL 2 distro disks (`ext4.vhdx`) grow but never
    shrink on their own. This step runs `fstrim` inside each distro (so freed

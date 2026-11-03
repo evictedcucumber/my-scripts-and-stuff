@@ -18,8 +18,10 @@
 
     Each step runs in its own console window: the orchestrator re-invokes this
     script with -RunStep <name> per step, polls for it, and reads a small JSON
-    result back from a temp run directory (printed at the start and end of the
-    run). That keeps each step's noisy output - winget's table redraws, the
+    result back from a run directory under
+    %LOCALAPPDATA%\windows_maintenance\runs (printed at the start and end of the
+    run; not under %TEMP%, where a later run's Disk Cleanup would empty it). The
+    newest 10 run directories are kept and older ones deleted at startup. That keeps each step's noisy output - winget's table redraws, the
     DISM progress bar, Optimize-Volume -Verbose - in a separate window and a
     per-step output.log, leaving the orchestrator window a clean progress list.
     A step window closes a few seconds after its step finishes, pass or fail
@@ -115,8 +117,12 @@
          "DISM /Online /Cleanup-Image /RestoreHealth" (scans the component
          store and repairs it only if it is damaged), then "sfc /scannow". The
          sfc outcome is read from the [SR] entries in CBS.log rather than its
-         localised console text. Unrepairable corruption fails the step; a
-         repaired one is reported. Runs before Disk Cleanup because the repair
+         localised console text. Unrepairable corruption or a failed
+         RestoreHealth fails the step (sfc passing does not clear the component
+         store), and a DISM failure saves the end of dism.log as dism_tail.log
+         in the step's folder; a repaired one is reported. Repairing from an ISO
+         is left to you, because the source must match the exact build and
+         edition. Runs before Disk Cleanup because the repair
          needs the component store intact.
 
       5. Disk Cleanup (all fixed drives) + component store
@@ -129,7 +135,9 @@
          "DISM /Online /Cleanup-Image /StartComponentCleanup" to trim the
          WinSxS component store. cleanmgr operates on every fixed drive, not
          just C:, and this empties the Recycle Bin. Reports the free-space
-         change per drive.
+         change per drive. If the integrity step failed or left no result, the
+         component store is not known to be healthy, so the DISM pass and the
+         "Update Cleanup" handler are skipped and the step reports WARN.
 
       6. WSL disk compaction  (Hyper-V Optimize-VHD)
          WSL 2 distro disks (ext4.vhdx) grow but never shrink on their own.
@@ -194,7 +202,7 @@
     by hand.
 
 .PARAMETER RunDir
-    Internal. The temp run directory a -RunStep child reads/writes (result JSON
+    Internal. The run directory a -RunStep child reads/writes (result JSON
     and output.log). Set by the orchestrator.
 
 .EXAMPLE
@@ -591,8 +599,8 @@ function Invoke-MaintenanceStep {
             'DriverUpdate' { Invoke-DriverUpdate }
             'Winget' { Invoke-WingetUpgrade -Scope User }
             'WingetSystem' { Invoke-WingetUpgrade -Scope System }
-            'Integrity' { Invoke-IntegrityRepair }
-            'DiskCleanup' { Invoke-DiskCleanup -SagerunProfile $script:SagerunProfile }
+            'Integrity' { Invoke-IntegrityRepair -StepDir $stepDir }
+            'DiskCleanup' { Invoke-DiskCleanup -SagerunProfile $script:SagerunProfile -RunDir $RunDir }
             'WslCompact' { Invoke-WslCompaction }
             'HealthCheck' { Invoke-HealthCheck }
             'DefragHdd' { Invoke-VolumeOptimization -Media Hdd }
@@ -651,6 +659,29 @@ function Invoke-MaintenanceStep {
         exit 1
     }
     exit 0
+}
+
+function Invoke-RunRetention {
+    # Deletes all but the newest $Keep run directories under $Root. Only touches
+    # folders named like a run's timestamp; a failure is a warning, not fatal.
+    param(
+        [Parameter(Mandatory)] [string] $Root,
+        [Parameter(Mandatory)] [int] $Keep
+    )
+
+    $runs = @(
+        Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d{8}_\d{6}$' } |
+            Sort-Object -Property Name -Descending
+    )
+    foreach ($oldRun in @($runs | Select-Object -Skip $Keep)) {
+        try {
+            Remove-Item -LiteralPath $oldRun.FullName -Recurse -Force -ErrorAction Stop
+        }
+        catch {
+            Write-Warning "Could not delete old run directory $($oldRun.FullName): $($_.Exception.Message)"
+        }
+    }
 }
 
 function Test-PendingReboot {
@@ -920,7 +951,7 @@ function Get-MaintenancePlan {
         $other.Add('WSL disk compaction will be skipped: the Hyper-V PowerShell module (Optimize-VHD) is not installed.')
     }
     $destructive.Add('Disk Cleanup on every fixed drive: empties the Recycle Bin and deletes temp files, error reports, thumbnails, Delivery Optimization and Windows Update leftovers. Not touched: the Downloads folder, previous Windows installation(s), device driver packages and Windows ESD files.')
-    $destructive.Add('DISM component store cleanup: removes superseded Windows component versions to free WinSxS space; they cannot be restored afterwards.')
+    $destructive.Add('DISM component store cleanup: removes superseded Windows component versions to free WinSxS space; they cannot be restored afterwards. Skipped if the system file repair step fails.')
     $disruptive.Add('Driver updates: may replace graphics / network / storage drivers - the screen or network can drop briefly and a faulty driver can misbehave (a restore point is created first).')
     $other.Add('Windows Update: installs OS updates plus Office and other Microsoft product updates (registers the Microsoft Update service if it is not already - the "Receive updates for other Microsoft products" setting). A reboot may be needed afterwards; this script never reboots.')
     $other.Add('System file repair: DISM RestoreHealth and sfc /scannow replace damaged Windows files with good copies (RestoreHealth may download them from Windows Update).')
@@ -1447,8 +1478,31 @@ function Get-SfcOutcome {
     return 'Unknown'
 }
 
+function Save-DismLogTail {
+    # Best-effort copy of the end of dism.log into the step's folder, while it
+    # still ends with this failure. True when the copy was written.
+    param(
+        [Parameter(Mandatory)] [string] $StepDir
+    )
+
+    try {
+        $dismLog = Join-Path $env:SystemRoot 'Logs\DISM\dism.log'
+        Get-Content -LiteralPath $dismLog -Tail 200 -ErrorAction Stop |
+            Set-Content -LiteralPath (Join-Path $StepDir 'dism_tail.log') -Encoding UTF8 -ErrorAction Stop
+        return $true
+    }
+    catch {
+        Write-Verbose "Could not copy the end of dism.log: $($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Invoke-IntegrityRepair {
     # DISM RestoreHealth, then sfc /scannow; unrepairable corruption fails it.
+    param(
+        [Parameter(Mandatory)] [string] $StepDir
+    )
+
     $problems = [System.Collections.Generic.List[string]]::new()
     $warnings = [System.Collections.Generic.List[string]]::new()
     $notes = [System.Collections.Generic.List[string]]::new()
@@ -1468,7 +1522,9 @@ function Invoke-IntegrityRepair {
         $notes.Add('component store repaired (reboot required)')
     }
     else {
-        $problems.Add("DISM RestoreHealth failed (exit $dismCode)")
+        $hex = '0x{0:X8}' -f ($dismCode -band 0xFFFFFFFF)
+        $logNote = if (Save-DismLogTail -StepDir $StepDir) { '; end of dism.log saved as dism_tail.log' } else { '' }
+        $problems.Add("DISM RestoreHealth failed (exit $hex$logNote)")
     }
 
     # sfc runs even if DISM failed - it reports on the live system files, which
@@ -1501,13 +1557,34 @@ function Invoke-IntegrityRepair {
 # Step 5: Disk Cleanup (all fixed drives) + WinSxS component store
 # ---------------------------------------------------------------------------
 
-function Invoke-DiskCleanup {
-    # Runs Disk Cleanup (cleanmgr /sagerun) on every fixed drive with all but
-    # the unsafe handlers enabled, then trims the WinSxS store with DISM.
+function Test-ComponentStoreVerified {
+    # True when this run's integrity step finished without failing. A failed
+    # step, or no readable result, means the store is not known to be healthy.
     param(
-        [Parameter(Mandatory)] [int] $SagerunProfile
+        [Parameter(Mandatory)] [string] $RunDir
     )
 
+    try {
+        $result = Get-Content -LiteralPath (Join-Path $RunDir 'Integrity\result.json') -Raw -ErrorAction Stop |
+            ConvertFrom-Json
+    }
+    catch {
+        Write-Verbose "Could not read the integrity result: $($_.Exception.Message)"
+        return $false
+    }
+    return (@('OK', 'WARN') -contains [string](Get-PropertyValue -InputObject $result -Name 'Status'))
+}
+
+function Invoke-DiskCleanup {
+    # Runs Disk Cleanup (cleanmgr /sagerun) on every fixed drive with all but
+    # the unsafe handlers enabled, then trims the WinSxS store with DISM. Old
+    # component versions are only removed once the store is known to be healthy.
+    param(
+        [Parameter(Mandatory)] [int] $SagerunProfile,
+        [Parameter(Mandatory)] [string] $RunDir
+    )
+
+    $storeVerified = Test-ComponentStoreVerified -RunDir $RunDir
     $ran = [System.Collections.Generic.List[string]]::new()
     $spaceBefore = Get-FixedVolumeSpace
 
@@ -1528,6 +1605,9 @@ function Invoke-DiskCleanup {
             'Device Driver Package'   # old driver versions - driver rollback
             'Windows ESD'             # source for a local "Reset this PC"
         )
+        if (-not $storeVerified) {
+            $excluded += '^Update Cleanup'    # Windows Update Cleanup: old component versions
+        }
 
         $flag = 'StateFlags{0:D4}' -f $SagerunProfile
         $caches = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches'
@@ -1560,21 +1640,28 @@ function Invoke-DiskCleanup {
     }
 
     # WinSxS component-store cleanup - where most of the reclaimable space is.
-    $dism = Join-Path $env:SystemRoot 'System32\Dism.exe'
-    Write-Output 'DISM /Online /Cleanup-Image /StartComponentCleanup ...'
-    & $dism /Online /Cleanup-Image /StartComponentCleanup /NoRestart
-    $dismCode = $LASTEXITCODE
-    if ($dismCode -eq 3010) {
-        # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED: the cleanup worked but wants a
-        # reboot to finish. Report it rather than failing the step.
-        $script:RebootRequired = $true
-        $ran.Add('DISM StartComponentCleanup (reboot required)')
-    }
-    elseif ($dismCode -ne 0) {
-        throw "DISM StartComponentCleanup failed (exit $dismCode)."
+    if (-not $storeVerified) {
+        Write-Warning 'The system file integrity step failed or left no result, so the component store is not known to be healthy: skipping DISM StartComponentCleanup and the Update Cleanup handler.'
+        $script:StepStatus = 'WARN'
+        $ran.Add('skipped DISM StartComponentCleanup and Update Cleanup (integrity step failed)')
     }
     else {
-        $ran.Add('DISM StartComponentCleanup')
+        $dism = Join-Path $env:SystemRoot 'System32\Dism.exe'
+        Write-Output 'DISM /Online /Cleanup-Image /StartComponentCleanup ...'
+        & $dism /Online /Cleanup-Image /StartComponentCleanup /NoRestart
+        $dismCode = $LASTEXITCODE
+        if ($dismCode -eq 3010) {
+            # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED: the cleanup worked but wants a
+            # reboot to finish. Report it rather than failing the step.
+            $script:RebootRequired = $true
+            $ran.Add('DISM StartComponentCleanup (reboot required)')
+        }
+        elseif ($dismCode -ne 0) {
+            throw "DISM StartComponentCleanup failed (exit $dismCode)."
+        }
+        else {
+            $ran.Add('DISM StartComponentCleanup')
+        }
     }
 
     # Free-space change per fixed drive (cleanmgr covers every drive, and the
@@ -2133,6 +2220,9 @@ $script:SelfPath = $PSCommandPath
 # Disk Cleanup "sageset/sagerun" profile number (StateFlags<N> registry values
 # and "cleanmgr /sagerun:N"). Fixed; not a parameter.
 $script:SagerunProfile = 100
+# Per-run logs. Not under %TEMP%: a later run's Disk Cleanup would empty them.
+$script:RunsRoot = Join-Path $env:LOCALAPPDATA 'windows_maintenance\runs'
+$script:RunsKept = 10
 
 $script:IsAdmin = Test-Administrator
 
@@ -2185,7 +2275,7 @@ if (-not $script:IsAdmin) {
         exit 1
     }
 
-    $summaryFile = Get-ChildItem -Path ([System.IO.Path]::GetTempPath()) -Directory -Filter 'windows_maintenance_*' -ErrorAction SilentlyContinue |
+    $summaryFile = Get-ChildItem -LiteralPath $script:RunsRoot -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.CreationTime -ge $launchedAt.AddSeconds(-5) } |
         ForEach-Object { Join-Path $_.FullName 'summary.txt' } |
         Where-Object { Test-Path -LiteralPath $_ } |
@@ -2197,8 +2287,9 @@ if (-not $script:IsAdmin) {
 }
 
 $overallStart = Get-Date
-$script:RunDir = Join-Path ([System.IO.Path]::GetTempPath()) ('windows_maintenance_{0}' -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+$script:RunDir = Join-Path $script:RunsRoot (Get-Date -Format 'yyyyMMdd_HHmmss')
 New-Item -ItemType Directory -Path $script:RunDir -Force | Out-Null
+Invoke-RunRetention -Root $script:RunsRoot -Keep $script:RunsKept
 
 Write-Output "Windows maintenance run - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 Write-Output "Host: $env:COMPUTERNAME   User: $env:USERNAME   Elevated: $script:IsAdmin   Disk Cleanup profile: $script:SagerunProfile"
