@@ -8,15 +8,16 @@
     front (some of it is destructive or disruptive), then runs unattended.
 
 .DESCRIPTION
-    Runs the steps below in order. Each step is independent - a failure is
-    caught, logged, and the run continues - and an OK / WARN / FAIL / SKIP
-    summary is printed at the end. WARN means a step finished but found
+    Runs the steps below in stages (see "Run order" below). Each step is
+    independent - a failure is caught, logged, and the run continues - and an
+    OK / WARN / FAIL / SKIP summary with each step's duration is printed at the
+    end. WARN means a step finished but found
     something worth a look (a health finding, a guard that held work back); it
     does not fail the run. The script exits non-zero if any step failed. It
     never reboots.
 
     Each step runs in its own console window: the orchestrator re-invokes this
-    script with -RunStep <name> per step, waits for it, and reads a small JSON
+    script with -RunStep <name> per step, polls for it, and reads a small JSON
     result back from a temp run directory (printed at the start and end of the
     run). That keeps each step's noisy output - winget's table redraws, the
     DISM progress bar, Optimize-Volume -Verbose - in a separate window and a
@@ -44,6 +45,21 @@
     that run's exit code; the summary is written to summary.txt in the run
     directory and echoed by the original window when the elevated run ends.
     Declining UAC exits non-zero. The winget user pass never runs elevated.
+
+    Run order. Steps are numbered below by what they do; they run in these
+    stages, each one starting when the previous one has fully finished:
+
+      a. One at a time: Windows Update, driver updates, winget (user), winget
+         (system), health check.
+      b. Two lanes at once: "system file integrity, Disk Cleanup, WSL
+         compaction" (one after another) alongside the HDD defrag. They do their
+         heavy work on different disks and take no shared lock, as long as the
+         WSL disk images are not on a hard disk (if they are, this still works
+         but compaction and defrag slow each other down).
+      c. Optimize the remaining volumes (SSD retrim), after the cleanup and
+         compaction that free space on them.
+      d. Microsoft Defender, on its own: a full scan also reads the hard disk
+         and could hold a WSL disk image open.
 
       1. Windows Update
          Scans, downloads, and installs all applicable software updates via the
@@ -121,8 +137,8 @@
          reclaimable), runs "wsl --shutdown" (approved in the up-front
          confirmation), then compacts each distro's .vhdx with
          "Optimize-VHD -Mode Full" and reports the space reclaimed. WSL is
-         left stopped; it restarts on next use. Runs before the volume
-         optimization step so the freed space is retrimmed. Guards - a
+         left stopped; it restarts on next use. Runs before the SSD retrim so
+         the freed space is retrimmed. Guards - a
          distro's disk is skipped (SKIP/WARN, never FAIL) when:
            - Optimize-VHD (Hyper-V PowerShell module) or the Hyper-V Virtual
              Machine Management service is missing/stopped - nothing runs and
@@ -151,13 +167,15 @@
          softer findings (nearly full, wear, temperature, recent hardware error
          events, unexpected shutdowns) make it WARN.
 
-      8. Optimize / defrag all volumes
+      8. Optimize / defrag all volumes  (two steps: HDD defrag, then the rest)
          Runs Optimize-Volume on every fixed NTFS/ReFS volume that has a drive
          letter. No operation switch is passed, so Windows performs the
          media-appropriate optimization per volume - full defragmentation on
          HDDs, retrim on SSDs, slab consolidation on thin-provisioned storage -
-         the same as the built-in "Optimize Drives" task and "defrag /O". A
-         volume whose disk reports anything but Healthy is skipped (WARN).
+         the same as the built-in "Optimize Drives" task and "defrag /O". Hard
+         disk volumes run in stage b; everything else, including a volume whose
+         media type cannot be determined, runs in stage c. A volume whose disk
+         reports anything but Healthy is skipped (WARN).
 
       9. Microsoft Defender update + scan
          Update-MpSignature, then a full scan (can take hours),
@@ -231,7 +249,7 @@ param(
     # Internal - set by the script when it relaunches itself / launches a step.
     # There are no user-facing options: every run does everything.
     [switch]$Relaunched,
-    [ValidateSet('WindowsUpdate', 'DriverUpdate', 'Winget', 'WingetSystem', 'Integrity', 'DiskCleanup', 'WslCompact', 'HealthCheck', 'Defrag', 'Defender')]
+    [ValidateSet('WindowsUpdate', 'DriverUpdate', 'Winget', 'WingetSystem', 'Integrity', 'DiskCleanup', 'WslCompact', 'HealthCheck', 'DefragHdd', 'OptimizeOther', 'Defender')]
     [string]$RunStep,
     [string]$RunDir
 )
@@ -244,8 +262,10 @@ $ErrorActionPreference = 'Stop'
 #
 # The orchestrator (a normal invocation) does no maintenance work itself: for
 # each step it launches a fresh console window that re-invokes this same script
-# with -RunStep <name>, waits for it, and reads back a small JSON result file
-# from -RunDir. So each step's noisy output (winget's redraws, DISM's progress
+# with -RunStep <name>, polls for it, and reads back a small JSON result file
+# from -RunDir. A stage's lanes run at the same time, the steps within a lane
+# one after another, and a stage starts once the previous one has finished. So
+# each step's noisy output (winget's redraws, DISM's progress
 # bar, Optimize-Volume -Verbose) lands in its own window and log, leaving the
 # orchestrator window a clean one-line-per-step progress list plus a summary.
 #
@@ -260,7 +280,7 @@ $ErrorActionPreference = 'Stop'
 #
 # Adding a step: add its name to the -RunStep ValidateSet and to
 # $script:StepTitles, add a case to the switch in Invoke-MaintenanceStep, and
-# add it to $plannedSteps in the Run section.
+# add it to $plannedStages in the Run section.
 # ---------------------------------------------------------------------------
 
 $script:Results = [System.Collections.Generic.List[psobject]]::new()
@@ -269,6 +289,7 @@ $script:IsAdmin = $false
 $script:StepDetail = ''
 $script:StepStatus = 'OK'
 $script:StepCount = 0
+$script:StepsStarted = 0
 $script:StepTitles = @{
     WindowsUpdate = 'Windows Update'
     DriverUpdate  = 'Driver updates (Windows Update)'
@@ -278,7 +299,8 @@ $script:StepTitles = @{
     DiskCleanup   = 'Disk Cleanup + WinSxS'
     WslCompact    = 'WSL disk compaction (Optimize-VHD)'
     HealthCheck   = 'Health check (disks, event log)'
-    Defrag        = 'Optimize / defrag volumes'
+    DefragHdd     = 'Defrag hard disk volumes'
+    OptimizeOther = 'Optimize SSD / other volumes'
     Defender      = 'Microsoft Defender update + scan'
 }
 $script:HostExe = (Get-Process -Id $PID).Path
@@ -351,19 +373,19 @@ function Invoke-UnelevatedStepWindow {
     Get-Process -Id $childPid -ErrorAction SilentlyContinue | Wait-Process -ErrorAction SilentlyContinue
 }
 
-function Invoke-Step {
-    # Orchestrator side: run one step in its own console window and fold the
-    # result it writes to $RunDir\<Step>\result.json into $script:Results.
+function Open-StepWindow {
+    # Orchestrator side: launch one step in its own console window without
+    # waiting for it, and return what Complete-StepWindow needs. The unelevated
+    # path does block until its step ends, so give such a step a stage of its own.
     param(
         [Parameter(Mandatory)] [string] $Name,
         [Parameter(Mandatory)] [ValidateScript({ $script:StepTitles.ContainsKey($_) })] [string] $Step,
+        [Parameter(Mandatory)] [int] $Order,
+        [Parameter(Mandatory)] [string] $Ordinal,
         [switch] $Unelevated
     )
 
-    $ordinal = '[{0}/{1}] {2}' -f ($script:Results.Count + 1), $script:StepCount, $Name
-
     $stepDir = Join-Path $script:RunDir $Step
-    $resultFile = Join-Path $stepDir 'result.json'
 
     $childArgs = @(
         '-NoProfile'
@@ -377,40 +399,67 @@ function Invoke-Step {
         (Format-ProcessArgument $script:RunDir)
     )
 
-    Write-Output "$ordinal - running in a separate window..."
     $start = Get-Date
-    $exitText = 'unknown'
+    $process = $null
+    $launchError = $null
     try {
         if ($Unelevated -and $script:IsAdmin) {
             Invoke-UnelevatedStepWindow -ChildArgs $childArgs -StepDir $stepDir
         }
         else {
-            $proc = Start-Process -FilePath $script:HostExe -ArgumentList $childArgs -Wait -PassThru -ErrorAction Stop
-            $exitText = [string]$proc.ExitCode
+            $process = Start-Process -FilePath $script:HostExe -ArgumentList $childArgs -PassThru -ErrorAction Stop
+            # Cache the handle now: without it .ExitCode reads empty once the
+            # process has exited.
+            $null = $process.Handle
         }
     }
     catch {
-        $detail = "could not launch step window: $($_.Exception.Message)"
-        Write-Warning "$ordinal - FAILED  $detail"
-        $script:Results.Add([pscustomobject]@{ Step = $Name; Status = 'FAIL'; Detail = $detail })
+        $launchError = "could not launch step window: $($_.Exception.Message)"
+    }
+
+    return [pscustomobject]@{
+        Name        = $Name
+        Order       = $Order
+        Ordinal     = $Ordinal
+        ResultFile  = Join-Path $stepDir 'result.json'
+        Process     = $process
+        Start       = $start
+        LaunchError = $launchError
+    }
+}
+
+function Complete-StepWindow {
+    # Orchestrator side: fold the result a finished step wrote to
+    # $RunDir\<Step>\result.json into $script:Results.
+    param(
+        [Parameter(Mandatory)] $Run
+    )
+
+    $span = (Get-Date) - $Run.Start
+    $duration = '{0:hh\:mm\:ss}' -f $span
+    $ordinal = $Run.Ordinal
+
+    if ($Run.LaunchError) {
+        Write-Warning "$ordinal - FAILED  $($Run.LaunchError)"
+        $script:Results.Add([pscustomobject]@{ Order = $Run.Order; Step = $Run.Name; Status = 'FAIL'; Duration = $duration; Detail = $Run.LaunchError })
         return
     }
-    $span = (Get-Date) - $start
 
     $result = $null
-    if (Test-Path -LiteralPath $resultFile) {
+    if (Test-Path -LiteralPath $Run.ResultFile) {
         try {
-            $result = Get-Content -LiteralPath $resultFile -Raw | ConvertFrom-Json
+            $result = Get-Content -LiteralPath $Run.ResultFile -Raw | ConvertFrom-Json
         }
         catch {
-            Write-Verbose "Could not parse ${resultFile}: $($_.Exception.Message)"
+            Write-Verbose "Could not parse $($Run.ResultFile): $($_.Exception.Message)"
         }
     }
 
     if ($null -eq $result -or -not $result.PSObject.Properties['Status']) {
+        $exitText = if ($Run.Process) { [string]$Run.Process.ExitCode } else { 'unknown' }
         $detail = "step window exited without a result (exit code $exitText)"
-        Write-Warning ('{0} - FAILED  ({1:hh\:mm\:ss})  {2}' -f $ordinal, $span, $detail)
-        $script:Results.Add([pscustomobject]@{ Step = $Name; Status = 'FAIL'; Detail = $detail })
+        Write-Warning "$ordinal - FAILED  ($duration)  $detail"
+        $script:Results.Add([pscustomobject]@{ Order = $Run.Order; Step = $Run.Name; Status = 'FAIL'; Duration = $duration; Detail = $detail })
         return
     }
 
@@ -420,14 +469,55 @@ function Invoke-Step {
     $status = [string]$result.Status
     $detail = [string]$result.Detail
 
-    $line = '{0} - {1}  ({2:hh\:mm\:ss})  {3}' -f $ordinal, $status, $span, $detail
+    $line = "$ordinal - $status  ($duration)  $detail"
     if ($status -eq 'OK') {
         Write-Output $line
     }
     else {
         Write-Warning $line
     }
-    $script:Results.Add([pscustomobject]@{ Step = $Name; Status = $status; Detail = $detail })
+    $script:Results.Add([pscustomobject]@{ Order = $Run.Order; Step = $Run.Name; Status = $status; Duration = $duration; Detail = $detail })
+}
+
+function Invoke-StepStage {
+    # Orchestrator side: run one stage. Its lanes run at the same time, the steps
+    # within a lane one after another; returns once every lane has finished.
+    param(
+        [Parameter(Mandatory)] [hashtable[]] $Lanes
+    )
+
+    $laneStates = @(
+        foreach ($lane in $Lanes) {
+            [pscustomobject]@{
+                Pending = [System.Collections.Generic.Queue[hashtable]]::new([hashtable[]]$lane.Steps)
+                Run     = $null
+            }
+        }
+    )
+
+    while ($true) {
+        $active = $false
+        foreach ($laneState in $laneStates) {
+            if ($laneState.Run -and ($null -eq $laneState.Run.Process -or $laneState.Run.Process.HasExited)) {
+                Complete-StepWindow -Run $laneState.Run
+                $laneState.Run = $null
+            }
+            if (-not $laneState.Run -and $laneState.Pending.Count -gt 0) {
+                $planned = $laneState.Pending.Dequeue()
+                $script:StepsStarted++
+                $ordinal = '[{0}/{1}] {2}' -f $script:StepsStarted, $script:StepCount, $planned.Name
+                Write-Output "$ordinal - running in a separate window..."
+                $laneState.Run = Open-StepWindow @planned -Order $script:StepsStarted -Ordinal $ordinal
+            }
+            if ($laneState.Run) {
+                $active = $true
+            }
+        }
+        if (-not $active) {
+            return
+        }
+        Start-Sleep -Seconds 1
+    }
 }
 
 function Disable-ConsoleQuickEdit {
@@ -505,7 +595,8 @@ function Invoke-MaintenanceStep {
             'DiskCleanup' { Invoke-DiskCleanup -SagerunProfile $script:SagerunProfile }
             'WslCompact' { Invoke-WslCompaction }
             'HealthCheck' { Invoke-HealthCheck }
-            'Defrag' { Invoke-VolumeOptimization }
+            'DefragHdd' { Invoke-VolumeOptimization -Media Hdd }
+            'OptimizeOther' { Invoke-VolumeOptimization -Media Other }
             'Defender' { Invoke-DefenderMaintenance }
         }
         # A step may down-grade itself to WARN / SKIP / FAIL (e.g. winget
@@ -697,6 +788,32 @@ function Get-VolumeDiskHealth {
     return $null
 }
 
+function Get-VolumeMediaType {
+    # MediaType of the physical disk behind a drive letter ('HDD', 'SSD', ...),
+    # or $null when it cannot be determined (Storage Spaces, exotic setups).
+    param(
+        [Parameter(Mandatory)] [string] $DriveLetter
+    )
+
+    try {
+        $disk = Get-Partition -DriveLetter $DriveLetter -ErrorAction Stop |
+            Get-Disk -ErrorAction Stop |
+            Select-Object -First 1
+        if ($disk) {
+            $physical = Get-PhysicalDisk -ErrorAction Stop |
+                Where-Object { [string]$_.DeviceId -eq [string]$disk.Number } |
+                Select-Object -First 1
+            if ($physical) {
+                return [string]$physical.MediaType
+            }
+        }
+    }
+    catch {
+        Write-Verbose "Could not determine media type for ${DriveLetter}: $($_.Exception.Message)"
+    }
+    return $null
+}
+
 function Get-WslInventory {
     # Registered WSL distributions for the current user, read from
     # HKCU\...\Lxss: name, WSL version, and where its .vhdx lives (WSL 2).
@@ -811,7 +928,7 @@ function Get-MaintenancePlan {
     $other.Add('Optimize volumes: defrag on HDDs, retrim on SSDs.')
     $other.Add('Microsoft Defender: signature update and a full scan (can take hours).')
     $other.Add('A System Restore point is created first (skipped by Windows if System Protection is off or one was made in the last 24 hours).')
-    $other.Add('Expect heavy CPU and disk use for a long while (DISM, Disk Cleanup, optimize, Defender). Each step runs in its own console window, and after this question the run needs no further input.')
+    $other.Add('Expect heavy CPU and disk use for a long while (DISM, Disk Cleanup, optimize, Defender). Each step runs in its own console window, some of them at the same time, and after this question the run needs no further input.')
 
     return [pscustomobject]@{
         Destructive = $destructive.ToArray()
@@ -1855,7 +1972,13 @@ function Invoke-HealthCheck {
 
 function Invoke-VolumeOptimization {
     # Runs Optimize-Volume (defrag or retrim, per media type) on each fixed
-    # NTFS/ReFS volume, skipping any whose disk reports it is unhealthy.
+    # NTFS/ReFS volume of the given kind, skipping any whose disk reports it is
+    # unhealthy. Hdd is hard disks only; Other is everything else, including
+    # volumes of unknown media, so every volume lands in exactly one of the two.
+    param(
+        [Parameter(Mandatory)] [ValidateSet('Hdd', 'Other')] [string] $Media
+    )
+
     $targets = @(
         Get-Volume |
             Where-Object {
@@ -1863,11 +1986,14 @@ function Invoke-VolumeOptimization {
                 $_.DriveType -eq 'Fixed' -and
                 @('NTFS', 'ReFS') -contains $_.FileSystemType
             } |
-            Sort-Object -Property DriveLetter
+            Sort-Object -Property DriveLetter |
+            Where-Object {
+                ((Get-VolumeMediaType -DriveLetter ([string]$_.DriveLetter)) -eq 'HDD') -eq ($Media -eq 'Hdd')
+            }
     )
 
     if ($targets.Count -eq 0) {
-        $script:StepDetail = 'no eligible fixed volumes'
+        $script:StepDetail = if ($Media -eq 'Hdd') { 'no eligible hard disk volumes' } else { 'no eligible SSD / other volumes' }
         return
     }
 
@@ -2083,23 +2209,70 @@ Invoke-Preflight -Space $spaceBefore
 Invoke-RestorePoint
 
 # Order matters: repair the component store before cleaning it, compact WSL
-# disks before the optimize step so the freed space gets retrimmed, and health-
-# check the disks before the optimize step so it can skip a failing one.
-$plannedSteps = [System.Collections.Generic.List[hashtable]]::new()
-$plannedSteps.Add(@{ Name = 'Windows Update'; Step = 'WindowsUpdate' })
-$plannedSteps.Add(@{ Name = 'Driver updates (Windows Update)'; Step = 'DriverUpdate' })
-$plannedSteps.Add(@{ Name = 'winget upgrade (user)'; Step = 'Winget'; Unelevated = $true })
-$plannedSteps.Add(@{ Name = 'winget upgrade (system)'; Step = 'WingetSystem' })
-$plannedSteps.Add(@{ Name = 'System file integrity (DISM + SFC)'; Step = 'Integrity' })
-$plannedSteps.Add(@{ Name = 'Disk Cleanup + WinSxS'; Step = 'DiskCleanup' })
-$plannedSteps.Add(@{ Name = 'WSL disk compaction'; Step = 'WslCompact' })
-$plannedSteps.Add(@{ Name = 'Health check (disks, event log)'; Step = 'HealthCheck' })
-$plannedSteps.Add(@{ Name = 'Optimize / defrag volumes'; Step = 'Defrag' })
-$plannedSteps.Add(@{ Name = 'Defender update + scan'; Step = 'Defender' })
+# disks before the SSD retrim so the freed space gets retrimmed, and health-check
+# the disks (its filesystem scan reads every volume) before the defrag starts.
+# Updates stay one at a time: they share the update agent and Windows' single
+# MSI install slot, a driver update can drop the network, Disk Cleanup deletes
+# update leftovers, and winget upgrading Microsoft.WSL runs wsl --shutdown.
+$plannedStages = @(
+    @{
+        Lanes = @(
+            @{
+                Steps = @(
+                    @{ Name = 'Windows Update'; Step = 'WindowsUpdate' }
+                    @{ Name = 'Driver updates (Windows Update)'; Step = 'DriverUpdate' }
+                    @{ Name = 'winget upgrade (user)'; Step = 'Winget'; Unelevated = $true }
+                    @{ Name = 'winget upgrade (system)'; Step = 'WingetSystem' }
+                    @{ Name = 'Health check (disks, event log)'; Step = 'HealthCheck' }
+                )
+            }
+        )
+    }
+    @{
+        Lanes = @(
+            @{
+                Steps = @(
+                    @{ Name = 'System file integrity (DISM + SFC)'; Step = 'Integrity' }
+                    @{ Name = 'Disk Cleanup + WinSxS'; Step = 'DiskCleanup' }
+                    @{ Name = 'WSL disk compaction'; Step = 'WslCompact' }
+                )
+            }
+            @{
+                Steps = @(
+                    @{ Name = 'Defrag hard disk volumes'; Step = 'DefragHdd' }
+                )
+            }
+        )
+    }
+    @{
+        Lanes = @(
+            @{
+                Steps = @(
+                    @{ Name = 'Optimize SSD / other volumes'; Step = 'OptimizeOther' }
+                )
+            }
+        )
+    }
+    @{
+        # Alone: the full scan also reads the hard disk and could hold a WSL
+        # disk image open.
+        Lanes = @(
+            @{
+                Steps = @(
+                    @{ Name = 'Defender update + scan'; Step = 'Defender' }
+                )
+            }
+        )
+    }
+)
 
-$script:StepCount = $plannedSteps.Count
-foreach ($plannedStep in $plannedSteps) {
-    Invoke-Step @plannedStep
+foreach ($plannedStage in $plannedStages) {
+    foreach ($plannedLane in $plannedStage.Lanes) {
+        $script:StepCount += $plannedLane.Steps.Count
+    }
+}
+foreach ($plannedStage in $plannedStages) {
+    Invoke-StepStage -Lanes $plannedStage.Lanes
 }
 
 # ---------------------------------------------------------------------------
@@ -2123,7 +2296,8 @@ Write-Output ('=' * 72)
 Write-Output ('  SUMMARY   (total {0:hh\:mm\:ss})' -f $span)
 Write-Output ('=' * 72)
 $script:Results |
-    Format-Table -AutoSize -Property Step, Status, Detail |
+    Sort-Object -Property Order |
+    Format-Table -AutoSize -Property Step, Status, Duration, Detail |
     Out-String |
     Write-Output
 

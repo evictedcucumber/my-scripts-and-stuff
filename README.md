@@ -306,7 +306,7 @@ builds the environment; later runs reuse it from the Nix store.
 Windows-side helper (not run from WSL/bash) that runs a batch of maintenance
 and health tasks in one pass — Windows Update, winget, DISM/SFC repair, Disk
 Cleanup, WSL disk compaction, a disk / event-log health check, drive
-optimization, driver updates and a Defender update + full scan — and prints an `OK` / `WARN` / `FAIL` / `SKIP` summary at the
+optimization, driver updates and a Defender update + full scan — and prints an `OK` / `WARN` / `FAIL` / `SKIP` summary, with each step's duration, at the
 end. Steps are independent — one failing does not abort the rest — and the
 script exits non-zero if any step failed. `WARN` means a step finished but found
 something worth a look (a health finding, a guard that held work back); it does
@@ -325,7 +325,7 @@ nearly-full volumes, and creates a System Restore point (Windows declines if Sys
 hours — the script says so and carries on).
 
 **Each step runs in its own console window.** The orchestrator re-invokes the
-script with an internal `-RunStep <name>` per step, waits for it, and reads a
+script with an internal `-RunStep <name>` per step, polls for it, and reads a
 small JSON result back from a temp run directory (path printed at the start and
 end of the run). That keeps each step's noisy output — winget's table redraws,
 the DISM progress bar, `Optimize-Volume -Verbose` — in a separate window and a
@@ -350,6 +350,21 @@ through `runas /trustlevel`).
 ```powershell
 .\scripts\maintenance\windows_maintenance.ps1
 ```
+
+**Run order.** The steps are numbered below by what they do. They run in stages,
+each starting when the previous one has fully finished:
+
+- **a. One at a time:** Windows Update, driver updates, winget (user), winget
+  (system), health check.
+- **b. Two lanes at once:** system file integrity → Disk Cleanup → WSL compaction
+  (one after another) alongside the HDD defrag. They do their heavy work on
+  different disks and take no shared lock, as long as the WSL disk images aren't
+  on a hard disk (if they are, it still works, but compaction and defrag slow
+  each other down).
+- **c. Optimize the remaining volumes** (SSD retrim), after the cleanup and
+  compaction that free space on them.
+- **d. Microsoft Defender, on its own:** a full scan also reads the hard disk and
+  could hold a WSL disk image open.
 
 1. **Windows Update** — installs all applicable *software* updates via the
    [`PSWindowsUpdate`](https://www.powershellgallery.com/packages/PSWindowsUpdate)
@@ -409,7 +424,7 @@ through `runas /trustlevel`).
    blocks are reclaimable), runs `wsl --shutdown` (approved in the up-front
    confirmation), then compacts each distro's `.vhdx` with Hyper-V's
    `Optimize-VHD -Mode Full` and reports the space reclaimed. WSL is left
-   stopped and restarts on next use. It runs before the optimize step so the
+   stopped and restarts on next use. It runs before the SSD retrim so the
    freed space gets retrimmed. Every guard is checked *before* `wsl --shutdown`,
    so a machine that can't compact never has WSL shut down for nothing. A
    distro's disk is skipped (`WARN`, never `FAIL`) when: the host volume's disk
@@ -440,7 +455,9 @@ through `runas /trustlevel`).
 8. **Optimize / defrag all volumes** — `Optimize-Volume` on every fixed
    NTFS/ReFS volume with a drive letter, with no operation switch so Windows
    picks the media-appropriate action per volume (defrag on HDD, retrim on SSD),
-   same as the built-in "Optimize Drives" task / `defrag /O`. A volume whose
+   same as the built-in "Optimize Drives" task / `defrag /O`. This is two steps:
+   hard disk volumes run in stage b; everything else, including a volume whose
+   media type can't be determined, runs in stage c. A volume whose
    disk reports anything but `Healthy` is skipped (`WARN`) — back it up first.
 9. **Microsoft Defender** — `Update-MpSignature`, then a full scan (can
    take hours), then reports signature age, real-time
