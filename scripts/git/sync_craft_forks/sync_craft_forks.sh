@@ -2,9 +2,11 @@
 #
 # sync_craft_forks.sh
 #
-# Reads a GitHub star list (default "zezura-archive-craft") for the authenticated gh
-# user. It first syncs every repo in it (steps 1-3), then builds every repo that
-# synced cleanly (step 4), then publishes those builds as releases (step 5):
+# Reads two GitHub star lists for the authenticated gh user: the apps
+# (default "zezura-archive-craft") and the libraries they build against (default
+# "zezura-archive-craft-libs"). It first syncs every repo in them, libraries
+# first (steps 1-3), then builds every repo that synced cleanly (step 4), then
+# publishes the apps' builds as releases (step 5):
 #   1. if it is a fork, syncs the fork's copy of the upstream default branch
 #      on GitHub from its parent (`gh repo sync`, fast-forward only unless
 #      --force);
@@ -27,11 +29,10 @@
 #      CRAFT_FONTS_DIR + CRAFT_FONTS_REQUIRED=1 like upstream's release builds,
 #      so the fonts are embedded (and a missing font is an error, not a
 #      silently font-less binary).
-#      If storytold/craft-libs is in the star list too (your fork, synced to
-#      DEST_DIR/craft-libs), cargo fetches the repos' craft-libs git
-#      dependencies from that local clone instead of GitHub; any commit a
-#      Cargo.lock pins that the clone lacks is fetched into it from the fork
-#      first.
+#      Cargo git dependencies on a repo in either list come from your copy of
+#      it, not the URL in Cargo.lock: its clone in DEST_DIR, or the fork on
+#      GitHub if it isn't cloned. Any commit a Cargo.lock pins that a clone
+#      lacks is fetched into it from the fork first. Cargo.lock isn't touched.
 #      Windows icon/version resources are not embedded: the apps only pull in
 #      `winresource` on Windows hosts, so their build.rs skips it (with a
 #      warning) when cross-compiling.
@@ -43,10 +44,15 @@
 #      updated in place instead (tag moved to the built commit, assets and
 #      notes replaced); skipped if it already points at the built commit.
 #
-# Repos without such a binary (e.g. craft-fonts or craft-libs, library/asset
-# repos) are synced but not built or released. Non-fork repos in the list are just
-# cloned/fetched and fast-forwarded on their default branch. Failures are collected per repo (and per build target) and
-# summarised at the end; the script exits 1 if anything failed.
+# Repos without such a binary but with library targets (e.g. craft-libs, egui)
+# get every workspace library built for both targets instead (`--workspace
+# --lib`, or just the `default-members` of a workspace that declares them, as
+# winit does), at the head of their branch, and are not released; one whose crates
+# all declare only Windows docs.rs targets (winprint.rs) is built for Windows
+# only. Repos with neither are only synced. Non-fork repos in the lists are just
+# cloned/fetched and fast-forwarded on their default branch. Failures are
+# collected per repo (and per build target) and summarised at the end; the
+# script exits 1 if anything failed.
 #
 # Usage:
 #   sync_craft_forks.sh [--sync|--build|--release] [-f|--force]
@@ -71,19 +77,22 @@
 #                 CRAFT_FONTS_CACHE are left alone. Needs no gh login.
 #   Only one of --sync/--build/--release/--clean may be given.
 #   --only REPO[,REPO...]
-#                 Only process these repos of the star list (repeatable). Each
+#                 Only process these repos of the star lists (repeatable). Each
 #                 REPO is matched, case-insensitively, against a repo's name,
 #                 its owner/name, or a fork's upstream owner/name; one matching
 #                 nothing is an error. Unselected repos are not synced, but
 #                 their existing clones/forks still serve the selected repos'
-#                 git dependencies (craft-libs, forked crates) and craft-fonts.
+#                 git dependencies and craft-fonts.
 #   -j, --jobs N  Sync up to N repos at once (default 1). Only steps 1-3 run in
 #                 parallel; builds and releases stay one at a time, as they
 #                 share the cargo target dir. With N > 1 each repo's sync
 #                 output is printed in one block when it finishes.
 #
 # Environment:
-#   STAR_LIST     Name of the star list to read (default: "zezura-archive-craft").
+#   STAR_LIST     Name of the apps star list (default: "zezura-archive-craft").
+#   LIBS_STAR_LIST
+#                 Name of the libraries star list
+#                 (default: "zezura-archive-craft-libs"; empty to read none).
 #   FORK_OWNER    User/org that owns the forks; only its repos get releases
 #                 (default: Zezura-Archive).
 #   BUILD_DIR     Where binaries are copied (default: ~/builds/craft-forks).
@@ -104,8 +113,7 @@
 #                 (default: ~/.cache/craft-forks/craft-fonts).
 #
 # All git traffic to GitHub goes over HTTPS using gh's token (SSH remotes are
-# rewritten for the run), so no SSH key or passphrase is needed. Cargo git
-# dependencies on a repo with a fork in the list are fetched from that fork.
+# rewritten for the run), so no SSH key or passphrase is needed.
 #
 # Requirements: nix (flakes are enabled per-invocation) and an authenticated gh
 # login. Everything else - gh, git, jq, cargo (with the x86_64-pc-windows-msvc
@@ -129,11 +137,13 @@ Usage: sync_craft_forks.sh [--sync|--build|--release] [-f|--force]
        sync_craft_forks.sh --clean
        sync_craft_forks.sh -h|--help
 
-Clone/sync every repo in a GitHub star list into DEST_DIR, syncing forks to
-their upstream default branch on GitHub first, then release-build each repo's
-main binary for Linux and Windows into BUILD_DIR/<name>/ (macOS is skipped),
-then publish them as a GitHub release (v<version>-forked; an existing release
-of that version is updated in place) on each repo you own.
+Clone/sync every repo in the apps and libraries star lists into DEST_DIR, syncing
+forks to their upstream default branch on GitHub first, then release-build each
+repo for Linux and Windows (macOS is skipped): an app's main binary goes into
+BUILD_DIR/<name>/, a library repo is just compiled. Apps are then published as a
+GitHub release (v<version>-forked; an existing release of that version is
+updated in place) on each repo you own. Cargo git dependencies on a repo in the
+lists come from your clone of it (else your fork), leaving Cargo.lock untouched.
 
 Arguments:
   DEST_DIR      Where repos are cloned (default: ~/repos/craft-forks).
@@ -154,7 +164,10 @@ Options:
   -h, --help    Show this help.
 
 Environment:
-  STAR_LIST     Star list to read (default: "zezura-archive-craft").
+  STAR_LIST     Apps star list (default: "zezura-archive-craft").
+  LIBS_STAR_LIST
+                Libraries star list (default: "zezura-archive-craft-libs"; empty
+                to read none).
   FORK_OWNER    Owner of the forks; only its repos get releases
                 (default: Zezura-Archive).
   BUILD_DIR     Where binaries go (default: ~/builds/craft-forks).
@@ -308,6 +321,7 @@ fi
 # ---------------------------------------------------------------------------
 
 STAR_LIST="${STAR_LIST:-zezura-archive-craft}"
+LIBS_STAR_LIST="${LIBS_STAR_LIST-zezura-archive-craft-libs}"
 # Releases are only created on repos owned by this account (the org holding
 # the forks), never on the upstream parents or anyone else's repo in the list.
 # The access checks below require you to be it or an active member of it.
@@ -326,12 +340,6 @@ export RUSTC_WRAPPER="${RUSTC_WRAPPER-sccache}"
 # The repos' release builds embed fonts from this repo at a pinned commit.
 CRAFT_FONTS_REPO="storytold/craft-fonts"
 CRAFT_FONTS_CACHE="${CRAFT_FONTS_CACHE:-$HOME/.cache/craft-forks/craft-fonts}"
-
-# The repos' crates depend on this repo's crates as cargo git dependencies.
-# When it is in the star list, its synced clone serves those (CRAFT_LIBS_LOCAL,
-# set after phase 1).
-CRAFT_LIBS_REPO="storytold/craft-libs"
-CRAFT_LIBS_LOCAL=""
 
 # ---------------------------------------------------------------------------
 # --clean: delete the build caches and stop
@@ -505,13 +513,12 @@ if [[ "$BUILD" == true ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Read the star list
+# Read the star lists
 #
-# Star lists are only exposed through GraphQL (viewer.lists). Find the list's
-# node id by name, then page through its items.
+# Star lists are only exposed through GraphQL (viewer.lists). Find each list's
+# node id by name, then page through its items. Libraries come first, so they
+# sync and build before the apps; a repo in both lists is processed once.
 # ---------------------------------------------------------------------------
-
-echo "Looking up star list '$STAR_LIST'..."
 
 LISTS_QUERY='
 query {
@@ -521,20 +528,6 @@ query {
     }
   }
 }'
-
-if ! list_id="$(
-  gh api graphql -f query="$LISTS_QUERY" |
-    jq -r --arg name "$STAR_LIST" \
-      '[.data.viewer.lists.nodes[] | select(.name == $name)][0].id // empty'
-)"; then
-  echo "Error: failed to fetch star lists from GitHub." >&2
-  exit 1
-fi
-
-if [[ -z "$list_id" ]]; then
-  echo "Error: no star list named '$STAR_LIST' found." >&2
-  exit 1
-fi
 
 # One TSV line per repo:
 #   nameWithOwner  isFork  isArchived  viewerPermission  branch  parentNameWithOwner
@@ -564,7 +557,23 @@ query($id: ID!, $endCursor: String) {
   }
 }'
 
-if ! items_tsv="$(
+if ! lists_json="$(gh api graphql -f query="$LISTS_QUERY")"; then
+  echo "Error: failed to fetch star lists from GitHub." >&2
+  exit 1
+fi
+
+read_star_list() {
+  local list="$1" list_id
+  list_id="$(
+    jq -r --arg name "$list" \
+      '[.data.viewer.lists.nodes[] | select(.name == $name)][0].id // empty' \
+      <<< "$lists_json"
+  )" || return 1
+  if [[ -z "$list_id" ]]; then
+    echo "Error: no star list named '$list' found." >&2
+    return 1
+  fi
+
   gh api graphql --paginate -f id="$list_id" -f query="$ITEMS_QUERY" |
     jq -r '
       .data.node.items.nodes[]
@@ -580,24 +589,38 @@ if ! items_tsv="$(
           (.parent.nameWithOwner // "")
         ]
       | @tsv'
-)"; then
-  echo "Error: failed to read items of star list '$STAR_LIST'." >&2
-  exit 1
-fi
+}
 
-mapfile -t ITEMS <<< "$items_tsv"
+STAR_LISTS=()
+[[ -n "$LIBS_STAR_LIST" ]] && STAR_LISTS+=("$LIBS_STAR_LIST")
+STAR_LISTS+=("$STAR_LIST")
 
-# mapfile on an empty string yields a single empty element - normalise to [].
-if [[ ${#ITEMS[@]} -eq 1 && -z "${ITEMS[0]}" ]]; then
-  ITEMS=()
-fi
+ITEMS=()
+declare -A LISTED=()
+for list in "${STAR_LISTS[@]}"; do
+  echo "Looking up star list '$list'..."
+  if ! items_tsv="$(read_star_list "$list")"; then
+    echo "Error: failed to read star list '$list'." >&2
+    exit 1
+  fi
 
-echo "Found ${#ITEMS[@]} repo(s) in '$STAR_LIST'."
+  mapfile -t list_items <<< "$items_tsv"
+  list_count=0
+  for item in "${list_items[@]}"; do
+    # mapfile on an empty string yields a single empty element.
+    [[ -n "$item" ]] || continue
+    list_count=$((list_count + 1))
+    repo="${item%%$'\t'*}"
+    [[ -z "${LISTED[$repo]:-}" ]] || continue
+    LISTED[$repo]=1
+    ITEMS+=("$item")
+  done
+  echo "Found $list_count repo(s) in '$list'."
+done
 
 # --only: narrow ITEMS to the matching repos. ALL_ITEMS keeps the full list for
 # the unselected repos' clones/forks, which the builds still fetch from.
 ALL_ITEMS=("${ITEMS[@]}")
-declare -A SELECTED=()
 if [[ ${#ONLY_NAMES[@]} -gt 0 ]]; then
   declare -A matched=()
   ITEMS=()
@@ -616,7 +639,6 @@ if [[ ${#ONLY_NAMES[@]} -gt 0 ]]; then
     done
     if [[ "$hit" == true ]]; then
       ITEMS+=("$item")
-      SELECTED[$repo]=1
     fi
   done
 
@@ -625,8 +647,8 @@ if [[ ${#ONLY_NAMES[@]} -gt 0 ]]; then
     [[ -n "${matched[$want]:-}" ]] || unmatched+=("$want")
   done
   if [[ ${#unmatched[@]} -gt 0 ]]; then
-    echo "Error: --only matched nothing in '$STAR_LIST' for: ${unmatched[*]}" >&2
-    echo "Repos in the list:" >&2
+    echo "Error: --only matched nothing in the star lists for: ${unmatched[*]}" >&2
+    echo "Repos in the lists:" >&2
     for item in "${ALL_ITEMS[@]}"; do
       printf '  %s\n' "${item%%$'\t'*}" >&2
     done
@@ -662,7 +684,7 @@ done
 if [[ ${#NO_WRITE[@]} -gt 0 ]]; then
   echo "Error: $GH_USER lacks write access to these forks (permission in brackets):" >&2
   printf '  - %s\n' "${NO_WRITE[@]}" >&2
-  echo "Grant $GH_USER write access to them (or move them into $FORK_OWNER), or drop them from '$STAR_LIST'." >&2
+  echo "Grant $GH_USER write access to them (or move them into $FORK_OWNER), or drop them from the star lists." >&2
   exit 1
 fi
 
@@ -835,80 +857,122 @@ prepare_craft_fonts() {
 }
 
 # ---------------------------------------------------------------------------
-# Make sure the local craft-libs clone has every craft-libs commit a repo's
-# Cargo.lock pins, so cargo can fetch them from it.
+# Make sure each local clone serving a repo's git dependencies has every commit
+# its Cargo.lock pins, so cargo can fetch them from it.
 #
-#   prepare_craft_libs DIR
+#   prepare_git_deps DIR
 #
-# Only used when CRAFT_LIBS_LOCAL is set. A pinned commit can be missing
-# locally if it was never on a branch the clone fetched (e.g. a deleted PR
-# branch); it is fetched from the fork, which GitHub serves every commit of the
-# fork network from. Such a commit has no ref, so a later `git gc` may prune it
-# and it is simply fetched again.
+# A pinned commit can be missing locally if it was never on a branch the clone
+# fetched (e.g. a deleted PR branch); it is fetched from the fork, which GitHub
+# serves every commit of the fork network from. Such a commit has no ref, so a
+# later `git gc` may prune it and it is simply fetched again. Locked git
+# dependencies with no copy in the star lists are reported once per run: cargo
+# gets those from the URL in Cargo.lock.
 # ---------------------------------------------------------------------------
 
-prepare_craft_libs() {
-  local lock="$1/Cargo.lock" line sha
+prepare_git_deps() {
+  local lock="$1/Cargo.lock" line upstream sha dir
   [[ -f "$lock" ]] || return 0
 
-  local source_re='^source = "git\+https://github\.com/'"$CRAFT_LIBS_REPO"'(\.git)?[?#].*#([0-9a-f]{40})"$'
-  local shas=()
+  local source_re='^source = "git\+https://github\.com/([^/?#]+/[^?#]+)(\?[^#]*)?#([0-9a-f]{40})"$'
+  local -A seen=() missing=()
   while IFS= read -r line; do
-    if [[ "$line" =~ $source_re ]]; then
-      shas+=("${BASH_REMATCH[2]}")
+    [[ "$line" =~ $source_re ]] || continue
+    upstream="${BASH_REMATCH[1]%.git}"
+    sha="${BASH_REMATCH[3]}"
+    [[ -z "${seen[$upstream/$sha]:-}" ]] || continue
+    seen[$upstream/$sha]=1
+
+    dir="${LOCAL_SOURCES[$upstream]:-}"
+    if [[ -n "$dir" ]]; then
+      git -C "$dir" cat-file -e "$sha^{commit}" 2>/dev/null || missing[$dir]+=" $sha"
+    elif [[ -z "${FORK_SOURCES[$upstream]:-}" && -z "${UPSTREAM_ONLY[$upstream]:-}" ]]; then
+      UPSTREAM_ONLY[$upstream]=1
+      echo "NOTE: no copy of $upstream in the star lists; fetching it from upstream."
     fi
   done < "$lock"
 
-  local missing=()
-  for sha in "${shas[@]}"; do
-    git -C "$CRAFT_LIBS_LOCAL" cat-file -e "$sha^{commit}" 2>/dev/null || missing+=("$sha")
+  local shas
+  for dir in "${!missing[@]}"; do
+    read -r -a shas <<< "${missing[$dir]}"
+    echo "Fetching ${#shas[@]} pinned commit(s) into $dir..."
+    git -C "$dir" fetch --quiet origin "${shas[@]}" || return 1
   done
-  [[ ${#missing[@]} -gt 0 ]] || return 0
-
-  mapfile -t missing < <(printf '%s\n' "${missing[@]}" | sort -u)
-  echo "Fetching ${#missing[@]} pinned $CRAFT_LIBS_REPO commit(s) into $CRAFT_LIBS_LOCAL..."
-  git -C "$CRAFT_LIBS_LOCAL" fetch --quiet origin "${missing[@]}" || return 1
 }
 
 # ---------------------------------------------------------------------------
-# Whether a repo has a main binary to build: package NAME with a bin target
-# NAME.
+# Print what a repo builds:
+#   bin          its main binary: package NAME with a bin target NAME
+#   lib          no main binary, but library targets (e.g. craft-libs, egui)
+#   windows-lib  lib, but every library crate declares only Windows docs.rs
+#                targets, as it won't compile elsewhere (winprint.rs)
+#   none         neither, or no Cargo.toml at all
 #
-#   has_main_bin DIR NAME
+#   repo_build_kind DIR NAME
 #
-# Returns 0 if it does, 1 if not (no Cargo.toml, or e.g. a library-only crate
-# like craft-fonts/craft-libs), 2 if cargo can't read the manifest.
+# Returns 1 if cargo can't read the manifest.
 # ---------------------------------------------------------------------------
 
-has_main_bin() {
+repo_build_kind() {
   local dir="$1" name="$2" metadata
-  [[ -f "$dir/Cargo.toml" ]] || return 1
-  metadata="$(cd -- "$dir" && cargo metadata --no-deps --format-version 1 --locked)" || return 2
-  jq -e --arg name "$name" '
-    any(.packages[] | select(.name == $name) | .targets[];
-        .name == $name and (.kind | index("bin")))' <<< "$metadata" >/dev/null || return 1
+  if [[ ! -f "$dir/Cargo.toml" ]]; then
+    echo none
+    return 0
+  fi
+  metadata="$(cd -- "$dir" && cargo metadata --no-deps --format-version 1 --locked)" || return 1
+  jq -r --arg name "$name" '
+    [.packages[]
+      | select(any(.targets[]; any(.kind[]; . == "lib" or . == "rlib" or . == "proc-macro")))
+      | .metadata.docs.rs.targets // []] as $lib_targets
+    | if any(.packages[] | select(.name == $name) | .targets[];
+        .name == $name and (.kind | index("bin")))
+      then "bin"
+      elif ($lib_targets | length) == 0
+      then "none"
+      elif all($lib_targets[]; length > 0 and all(.[]; test("windows")))
+      then "windows-lib"
+      else "lib" end' <<< "$metadata"
 }
 
 # ---------------------------------------------------------------------------
-# Release-build one target of a repo's main binary and copy it to
-# BUILD_DIR/<name>/<name>-<label><suffix>.
+# Release-build one target of a repo.
 #
-#   build_target DIR NAME LABEL TRIPLE SUFFIX CARGO_ARGS...
+#   build_target KIND DIR NAME LABEL TRIPLE SUFFIX CARGO_ARGS...
 #
-# TRIPLE is the target/ subdirectory cargo writes to; CARGO_ARGS is the cargo
-# subcommand plus its --target. The binary is copied, not moved, so cargo's
-# build cache stays fresh and an unchanged repo rebuilds as a no-op.
+# KIND bin builds the main binary and copies it to
+# BUILD_DIR/<name>/<name>-<label><suffix>: copied, not moved, so cargo's build
+# cache stays fresh and an unchanged repo rebuilds as a no-op. Any other KIND
+# compiles every workspace library, with nothing to copy; a workspace declaring
+# default-members builds only those, since winit's members include per-platform
+# backends that can't all compile for one target. TRIPLE is the target/
+# subdirectory cargo writes to; CARGO_ARGS is the cargo subcommand plus its
+# --target. A repo that doesn't track a Cargo.lock (winprint.rs ignores it) can't
+# build --locked.
 # ---------------------------------------------------------------------------
 
 build_target() {
-  local dir="$1" name="$2" label="$3" triple="$4" suffix="$5"
-  shift 5
+  local kind="$1" dir="$2" name="$3" label="$4" triple="$5" suffix="$6"
+  shift 6
+
+  local selection=(-p "$name" --bin "$name") locked=()
+  if [[ "$kind" != bin ]]; then
+    selection=(--lib)
+    grep -q '^default-members' "$dir/Cargo.toml" || selection+=(--workspace)
+  fi
+  if git -C "$dir" ls-files --error-unmatch Cargo.lock >/dev/null 2>&1; then
+    locked=(--locked)
+  fi
 
   echo "Building $name for $label..."
   (
     cd -- "$dir" || exit 1
-    cargo "$@" --release --locked -p "$name" --bin "$name" || exit 1
+    cargo "$@" --release "${locked[@]}" "${selection[@]}" || exit 1
   ) || return 1
+
+  if [[ "$kind" != bin ]]; then
+    echo "Built $name's libraries for $label."
+    return 0
+  fi
 
   local out="$CARGO_TARGET_DIR/$triple/release/$name$suffix"
   if [[ ! -f "$out" ]]; then
@@ -1039,9 +1103,9 @@ SYNCED=()
 # are released.
 BUILT=()
 
-# "parent<TAB>fork" for each fork that synced cleanly; the build phase fetches
-# git dependencies on a parent from the fork instead.
-FORK_SOURCES=()
+# Upstream owner/name -> the clone or fork its git dependencies are fetched
+# from, and the upstreams already reported as having neither.
+declare -A LOCAL_SOURCES=() FORK_SOURCES=() UPSTREAM_ONLY=()
 
 # ---------------------------------------------------------------------------
 # Phase 1: clone and sync every repo
@@ -1161,7 +1225,7 @@ fi
 
 # Collect the results in star-list order.
 for i in "${!ITEMS[@]}"; do
-  IFS=$'\t' read -r repo is_fork _ _ branch parent <<< "${ITEMS[$i]}"
+  IFS=$'\t' read -r repo _ _ _ branch _ <<< "${ITEMS[$i]}"
   name="${repo#*/}"
   result=""
   if [[ -f "$WORK_DIR/$i" ]]; then
@@ -1174,28 +1238,6 @@ for i in "${!ITEMS[@]}"; do
   fi
 
   SYNCED+=("$repo"$'\t'"$name"$'\t'"$DEST_DIR/$name"$'\t'"$branch")
-  # craft-libs is served from this clone instead of its fork on GitHub.
-  if [[ "${parent:-$repo}" == "$CRAFT_LIBS_REPO" ]]; then
-    CRAFT_LIBS_LOCAL="$DEST_DIR/$name"
-  elif [[ "$is_fork" == true ]]; then
-    FORK_SOURCES+=("$parent"$'\t'"$repo")
-  fi
-done
-
-# Repos left out by --only weren't synced this run, but their existing
-# craft-libs clone and forks still serve the selected repos' git dependencies
-# (prepare_craft_libs fetches any pinned commit the clone lacks).
-for item in "${ALL_ITEMS[@]}"; do
-  IFS=$'\t' read -r repo is_fork _ _ _ parent <<< "$item"
-  [[ ${#ONLY_NAMES[@]} -gt 0 && -z "${SELECTED[$repo]:-}" ]] || continue
-  name="${repo#*/}"
-  if [[ "${parent:-$repo}" == "$CRAFT_LIBS_REPO" ]]; then
-    if [[ -z "$CRAFT_LIBS_LOCAL" && -d "$DEST_DIR/$name/.git" ]]; then
-      CRAFT_LIBS_LOCAL="$DEST_DIR/$name"
-    fi
-  elif [[ "$is_fork" == true ]]; then
-    FORK_SOURCES+=("$parent"$'\t'"$repo")
-  fi
 done
 
 # ---------------------------------------------------------------------------
@@ -1207,39 +1249,45 @@ if [[ "$BUILD" == true && ${#SYNCED[@]} -gt 0 ]]; then
   echo "Synced ${#SYNCED[@]} of ${#ITEMS[@]} repo(s); building..."
 fi
 
-# Git dependencies on a repo we hold a fork of (e.g. effectcraft's filmcraft-*
-# crates) are fetched from the fork, not upstream. A git URL rewrite (for this
-# run only, like the SSH one above) leaves every Cargo.toml/Cargo.lock as is,
-# so --locked still holds: the lockfile keeps the upstream URL and pinned rev,
-# and the fork, just synced from upstream, has that commit. cargo's built-in
-# libgit2 ignores GIT_CONFIG_* env vars, hence fetching with the git CLI.
-# insteadOf is a prefix match: it covers .../filmcraft.git, but would also
-# catch an unrelated upstream repo whose name starts with a fork's (.../filmcraft-x).
-if [[ "$BUILD" == true && ${#FORK_SOURCES[@]} -gt 0 ]]; then
-  export CARGO_NET_GIT_FETCH_WITH_CLI=true
-  for entry in "${FORK_SOURCES[@]}"; do
-    IFS=$'\t' read -r parent repo <<< "$entry"
-    echo "Fetching git dependencies on $parent from $repo."
-    export "GIT_CONFIG_KEY_$git_config_idx=url.https://github.com/$repo.insteadOf"
-    export "GIT_CONFIG_VALUE_$git_config_idx=https://github.com/$parent"
-    git_config_idx=$((git_config_idx + 1))
-  done
+# Git dependencies on a repo in the star lists come from your copy of it instead
+# of the URL in Cargo.lock: its clone in DEST_DIR, else (not cloned) its fork on
+# GitHub. That holds for repos left out by --only, and for a clone whose sync
+# failed: commits are immutable, and prepare_git_deps fetches any it lacks. A git
+# URL rewrite (for this run only, like the SSH one above) leaves every
+# Cargo.toml/Cargo.lock as is, so --locked still holds: the lockfile keeps the
+# upstream URL and pinned rev. cargo's built-in libgit2 ignores GIT_CONFIG_* env
+# vars, hence fetching with the git CLI. A commit already in cargo's git database
+# isn't fetched at all, but it is the same commit wherever it came from.
+#
+# insteadOf is a prefix match, and git applies the longest match. A clone needs
+# the .git form too, which would otherwise become a nonexistent <clone>.git; a
+# fork doesn't. The prefix would also catch an unrelated upstream repo whose name
+# starts with a listed one's (.../filmcraft-x).
+add_git_rewrite() {
+  export "GIT_CONFIG_KEY_$git_config_idx=url.$1.insteadOf"
+  export "GIT_CONFIG_VALUE_$git_config_idx=$2"
+  git_config_idx=$((git_config_idx + 1))
   export GIT_CONFIG_COUNT="$git_config_idx"
-fi
+}
 
-# Likewise craft-libs, but from its synced clone in DEST_DIR (like craft-fonts),
-# so cargo doesn't download a second copy. The .git form is listed too: git
-# applies the longest matching insteadOf, which would otherwise turn
-# .../craft-libs.git into a nonexistent .../craft-libs.git directory.
-if [[ "$BUILD" == true && -n "$CRAFT_LIBS_LOCAL" ]]; then
+if [[ "$BUILD" == true ]]; then
   export CARGO_NET_GIT_FETCH_WITH_CLI=true
-  echo "Fetching git dependencies on $CRAFT_LIBS_REPO from $CRAFT_LIBS_LOCAL."
-  for suffix in .git ""; do
-    export "GIT_CONFIG_KEY_$git_config_idx=url.file://$CRAFT_LIBS_LOCAL.insteadOf"
-    export "GIT_CONFIG_VALUE_$git_config_idx=https://github.com/$CRAFT_LIBS_REPO$suffix"
-    git_config_idx=$((git_config_idx + 1))
+  for item in "${ALL_ITEMS[@]}"; do
+    IFS=$'\t' read -r repo is_fork _ _ _ parent <<< "$item"
+    name="${repo#*/}"
+    upstream="${parent:-$repo}"
+    if [[ -d "$DEST_DIR/$name/.git" ]]; then
+      echo "Fetching git dependencies on $upstream from $DEST_DIR/$name."
+      LOCAL_SOURCES[$upstream]="$DEST_DIR/$name"
+      for suffix in .git ""; do
+        add_git_rewrite "file://$DEST_DIR/$name" "https://github.com/$upstream$suffix"
+      done
+    elif [[ "$is_fork" == true ]]; then
+      echo "Fetching git dependencies on $upstream from $repo."
+      FORK_SOURCES[$upstream]="$repo"
+      add_git_rewrite "https://github.com/$repo" "https://github.com/$upstream"
+    fi
   done
-  export GIT_CONFIG_COUNT="$git_config_idx"
 fi
 
 for entry in "${SYNCED[@]}"; do
@@ -1257,17 +1305,13 @@ for entry in "${SYNCED[@]}"; do
     continue
   fi
 
-  # Repos with no binary of their own (e.g. craft-fonts or craft-libs, font and
-  # library repos the others build against) are only synced: nothing to build
-  # or release.
-  bin_status=0
-  has_main_bin "$dest" "$name" || bin_status=$?
-  if [[ "$bin_status" -eq 1 ]]; then
-    echo "Not building $repo: no '$name' binary (sync only)."
-    continue
-  elif [[ "$bin_status" -ne 0 ]]; then
+  if ! kind="$(repo_build_kind "$dest" "$name")"; then
     echo "WARNING: failed to read the cargo metadata of $dest; not building it." >&2
     FAILED+=("$repo (build: cargo metadata)")
+    continue
+  fi
+  if [[ "$kind" == none ]]; then
+    echo "Not building $repo: no binary or library targets (sync only)."
     continue
   fi
 
@@ -1288,9 +1332,9 @@ for entry in "${SYNCED[@]}"; do
     export CRAFT_FONTS_DIR="$CRAFT_FONTS_CACHE" CRAFT_FONTS_REQUIRED=1
   fi
 
-  if [[ -n "$CRAFT_LIBS_LOCAL" ]] && ! prepare_craft_libs "$dest"; then
-    echo "WARNING: failed to fetch the $CRAFT_LIBS_REPO commits $repo pins; not building it." >&2
-    FAILED+=("$repo (build: craft-libs)")
+  if ! prepare_git_deps "$dest"; then
+    echo "WARNING: failed to fetch the git dependency commits $repo pins; not building it." >&2
+    FAILED+=("$repo (build: git dependencies)")
     continue
   fi
 
@@ -1301,22 +1345,25 @@ for entry in "${SYNCED[@]}"; do
   # it wins. Linux-only; the xwin (clang-cl) builds are unaffected.
   built=true
 
-  if ! CFLAGS_x86_64_unknown_linux_gnu="-fno-function-sections -fno-data-sections" \
-    build_target "$dest" "$name" linux-x86_64 x86_64-unknown-linux-gnu "" \
+  if [[ "$kind" == windows-lib ]]; then
+    echo "Not building $repo for Linux: it only declares Windows targets."
+  elif ! CFLAGS_x86_64_unknown_linux_gnu="-fno-function-sections -fno-data-sections" \
+    build_target "$kind" "$dest" "$name" linux-x86_64 x86_64-unknown-linux-gnu "" \
     zigbuild --target x86_64-unknown-linux-gnu.2.35; then
     echo "WARNING: Linux build of $repo failed" >&2
     FAILED+=("$repo (build: linux-x86_64)")
     built=false
   fi
 
-  if ! build_target "$dest" "$name" windows-x86_64 x86_64-pc-windows-msvc .exe \
+  if ! build_target "$kind" "$dest" "$name" windows-x86_64 x86_64-pc-windows-msvc .exe \
     xwin build --target x86_64-pc-windows-msvc; then
     echo "WARNING: Windows build of $repo failed" >&2
     FAILED+=("$repo (build: windows-x86_64)")
     built=false
   fi
 
-  if [[ "$built" == true ]]; then
+  # Only main binaries get released.
+  if [[ "$built" == true && "$kind" == bin ]]; then
     BUILT+=("$entry")
   fi
 done

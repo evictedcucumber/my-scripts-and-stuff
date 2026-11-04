@@ -103,11 +103,12 @@ SSH key — and no hardware-key (Yubikey) PIN/touch prompt per repo — is neede
 
 ## scripts/git/sync_craft_forks/sync_craft_forks.sh
 
-Reads a GitHub star list (default **zezura-archive-craft**) for the `gh`-authenticated
-user and keeps every repo in it mirrored locally. It runs in phases: steps 1–3
-for **every** repo first, then step 4 for each repo that synced cleanly, then
-step 5 for each repo that built cleanly, so a slow or failing build never holds
-up the syncing.
+Reads two GitHub star lists for the `gh`-authenticated user, the apps (default
+**zezura-archive-craft**) and the libraries they build against (default
+**zezura-archive-craft-libs**), and keeps every repo in them mirrored locally. It
+runs in phases: steps 1–3 for **every** repo first, libraries before apps, then
+step 4 for each repo that synced cleanly, then step 5 for each app that built
+cleanly, so a slow or failing build never holds up the syncing.
 
 1. **Forks** — syncs the fork's copy of the upstream default branch on GitHub
    from its parent (`gh repo sync <fork> --branch <upstream default>`),
@@ -179,10 +180,23 @@ up the syncing.
    (`gh release upload --clobber`). If it already points at the built commit,
    nothing is done.
 
-Repos with no binary named after the repo (checked with `cargo metadata`), such
-as **craft-fonts** and **craft-libs** — the font and library repos the apps
-build against — are synced
-(steps 1–3) but not built or released. Non-fork repos in the list are just
+Repos with no binary named after the repo (checked with `cargo metadata`) but
+with library targets, such as **craft-libs**, **craft-fonts** and **egui**, get
+every workspace library compiled for both targets (`cargo ... --release
+--workspace --lib`) in step 4 and are not released; there is nothing to copy to
+`BUILD_DIR`. They are built at the head of their branch, whereas the apps compile
+the commits their `Cargo.lock` pins, so this checks the libraries build rather
+than producing anything the apps reuse. A workspace that declares
+`default-members` builds only those (`--lib` without `--workspace`): **winit**'s
+members include per-platform backends that can't all compile for one target, and
+its `winit` crate pulls in the right ones. **winprint.rs** is the odd one out: it
+only compiles on Windows, which it declares through its docs.rs `targets`
+metadata (a repo whose library crates all list only Windows targets skips the
+Linux build), and it gitignores its `Cargo.lock`, so it is built without
+`--locked`; a tracked lockfile always gets `--locked`. Its default `pdfium`
+feature also downloads PDFium at build time, which the apps' `default-features =
+false` dependency doesn't. Repos with neither a binary nor libraries are only
+synced (steps 1–3). Non-fork repos in the lists are just
 cloned/fetched and fast-forwarded on their default branch. A fork whose branch has diverged from upstream, a fork that is
 archived (read-only) on GitHub, or a local clone with diverged commits is
 reported as failed rather than overwritten. Each failed step (sync, clone,
@@ -197,7 +211,7 @@ each build target) is listed at the end and the script **exits 1**.
 ./scripts/git/sync_craft_forks/sync_craft_forks.sh -j 8         # sync 8 repos at a time
 ./scripts/git/sync_craft_forks/sync_craft_forks.sh --build --only filmcraft,effectcraft
 ./scripts/git/sync_craft_forks/sync_craft_forks.sh ~/archive    # custom source destination
-STAR_LIST="Other List" ./scripts/git/sync_craft_forks/sync_craft_forks.sh
+STAR_LIST="Other List" LIBS_STAR_LIST="" ./scripts/git/sync_craft_forks/sync_craft_forks.sh
 ```
 
 - `DEST_DIR` (optional positional) — where repos are cloned; default
@@ -215,18 +229,21 @@ STAR_LIST="Other List" ./scripts/git/sync_craft_forks/sync_craft_forks.sh
   `CRAFT_FONTS_CACHE` are kept, and no `gh` login is needed. Takes no other
   options or `DEST_DIR`.
 - Only one of `--sync`/`--build`/`--release`/`--clean` may be given.
-- `--only REPO[,REPO...]` — process only these repos of the star list
+- `--only REPO[,REPO...]` — process only these repos of the star lists
   (repeatable, comma-separated). Each is matched case-insensitively against a
   repo's name, its `owner/name`, or a fork's upstream `owner/name`; a name that
-  matches nothing is an error, listing the repos in the list. Unselected repos
+  matches nothing is an error, listing the repos in the lists. Unselected repos
   aren't synced, built or released, but their existing clones and forks still
-  serve the selected repos' git dependencies (craft-libs, forked crates) and
-  craft-fonts, as in a full run.
+  serve the selected repos' git dependencies and craft-fonts, as in a full run.
 - `-j, --jobs N` — sync up to N repos in parallel (default 1). Only the sync
   phase (steps 1-3) runs in parallel: builds share the cargo target dir and
   run one at a time, as do releases. With N > 1 each repo's sync output is
   buffered and printed as one block when that repo finishes.
-- `STAR_LIST` — env var; the star list name to read (exact match).
+- `STAR_LIST` — env var; the apps star list to read (exact match; default
+  `zezura-archive-craft`).
+- `LIBS_STAR_LIST` — env var; the libraries star list to read (exact match;
+  default `zezura-archive-craft-libs`). A list that doesn't exist is an error;
+  set it empty to read only `STAR_LIST`.
 - `FORK_OWNER` — env var; user/org that owns the forks, the only owner whose
   repos get releases (default `Zezura-Archive`, matched case-insensitively).
 - `BUILD_DIR` — env var; where binaries go (default `~/builds/craft-forks`).
@@ -239,7 +256,7 @@ STAR_LIST="Other List" ./scripts/git/sync_craft_forks/sync_craft_forks.sh
   (`SCCACHE_DIR`, `SCCACHE_CACHE_SIZE`, default 10 GiB, ...) apply as usual.
 - `CRAFT_FONTS_CACHE` — env var; the craft-fonts checkout that font-embedding
   builds use (default `~/.cache/craft-forks/craft-fonts`), switched between
-  the commits the repos pin. When craft-fonts is in the star list (your fork,
+  the commits the repos pin. When craft-fonts is in a star list (your fork,
   synced to `DEST_DIR/craft-fonts` like the others), it is a detached
   `git worktree` of that clone, so nothing is downloaded twice and the synced
   clone's branch is left alone; otherwise it is a standalone clone of
@@ -256,22 +273,28 @@ duration of the run only, the script sets `GIT_CONFIG_*` env vars that rewrite
 use `gh auth git-credential` as the sole credential helper for `github.com`;
 your global git/gh config and the clones' saved remote URLs are left unchanged.
 
-The build phase also fetches cargo git dependencies on any repo whose fork
-synced cleanly from that fork rather than from upstream: for example,
-effectcraft's `filmcraft-*` crates come from `Zezura-Archive/filmcraft`, not
-`storytold/filmcraft`. This works the same way, through a run-only `insteadOf`
-rewrite plus `CARGO_NET_GIT_FETCH_WITH_CLI=true`, so no `Cargo.toml` or
-`Cargo.lock` is touched. The lockfile still pins the same commit, so the code
-built is identical; only where it is fetched from changes.
+The build phase also takes cargo git dependencies from your copy of a repo
+rather than the URL in `Cargo.lock`, for any repo in either star list:
 
-**craft-libs** goes one step further, like craft-fonts: when
-[storytold/craft-libs](https://github.com/storytold/craft-libs) is in the star
-list (your fork, synced to `DEST_DIR/craft-libs`), its crates (`craft-ui`,
-`craft-docpath`, `craft-print`, ...) are fetched from that **local clone**
-(`file://` rewrite) instead of GitHub. Before each build, any craft-libs
-commit the repo's `Cargo.lock` pins that the clone lacks (e.g. one only on a
-deleted PR branch) is fetched into it from your fork first; if that fails the
-repo isn't built.
+1. its **local clone** in `DEST_DIR`, through a `file://` rewrite (e.g.
+   `https://github.com/storytold/egui.git` → `DEST_DIR/egui`), including a clone
+   left out by `--only` or whose sync failed;
+2. otherwise, if it has never been cloned, its **fork on GitHub** (e.g.
+   `Zezura-Archive/egui`).
+
+This works through a run-only `insteadOf` rewrite plus
+`CARGO_NET_GIT_FETCH_WITH_CLI=true`, so no `Cargo.toml` or `Cargo.lock` is
+touched and `--locked` still holds. The lockfile keeps pinning the same commit,
+so the code built is identical; only where it is fetched from changes. A commit
+already in cargo's git database (`~/.cargo/git/db`) isn't fetched again, wherever
+it first came from.
+
+Before each build, any commit the repo's `Cargo.lock` pins that a clone lacks
+(e.g. egui's pinned rev, which isn't on its `main`, or one only on a deleted PR
+branch) is fetched into that clone from your fork; if that fails the repo isn't
+built. A locked git dependency with no copy in either list falls back to
+upstream, reported by a `NOTE:` once per run; fork it and add it to
+`zezura-archive-craft-libs` to stop that.
 
 Requires: `nix`, and `gh` authenticated (and allowed to push to and create
 releases on the `FORK_OWNER` org's repos).

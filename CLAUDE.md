@@ -18,7 +18,7 @@ scripts/
     github_backup.sh     # backs up all repos for a GitHub owner into a 7z archive
     sync_craft_forks/
       flake.nix               # the script's own runtime env; the script re-execs itself in its devShell
-      sync_craft_forks.sh   # clones/syncs every repo in a GitHub star list (forks synced to upstream on GitHub + locally), then cross-builds each main binary for Linux/Windows and releases them on the Zezura-Archive org forks
+      sync_craft_forks.sh   # clones/syncs every repo in the apps and libs GitHub star lists (forks synced to upstream on GitHub + locally), then cross-builds each app's main binary and each library repo for Linux/Windows (cargo git deps served from the local clones/forks, Cargo.lock untouched) and releases the apps on the Zezura-Archive org forks
   maintenance/
     windows_maintenance.ps1   # Windows Update + winget + DISM/SFC + Disk Cleanup + WSL disk compaction + health check + defrag + Defender + driver updates; no options - confirms once up front then runs unattended, each step in its own window, self-elevates via UAC
   nix/
