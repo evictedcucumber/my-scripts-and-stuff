@@ -16,6 +16,7 @@ scripts/
     archive_directory.ps1   # max-compression 7z of a directory into ~/Downloads/YYYY-MM-DD.7z
   git/
     github_backup.sh     # backs up all repos for a GitHub owner into a 7z archive
+    prune_merged.sh      # removes clean worktrees and deletes local branches already merged into main (ff/rebase/squash); confirms first
     sync_craft_forks/
       flake.nix               # the script's own runtime env; the script re-execs itself in its devShell
       sync_craft_forks.sh   # clones/syncs every repo in the apps and libs GitHub star lists (forks synced to upstream on GitHub + locally), then cross-builds each app's main binary and each library repo for Linux/Windows (cargo git deps served from the local clones/forks, Cargo.lock untouched) and releases the apps on the Zezura-Archive org forks

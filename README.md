@@ -101,6 +101,55 @@ submodule URLs are rewritten to HTTPS. This is set through `GIT_CONFIG_*`
 environment variables for the run only; your git/gh config is untouched. So no
 SSH key — and no hardware-key (Yubikey) PIN/touch prompt per repo — is needed.
 
+## scripts/git/prune_merged.sh
+
+Cleans up the git repo you run it in (from any directory inside it): removes
+every linked worktree and deletes every local branch whose work is committed
+and already merged into `main`. Prints the plan, with a reason for everything
+it keeps, and asks before changing anything.
+
+```bash
+prune_merged.sh            # show the plan, confirm, then prune
+prune_merged.sh -n         # show the plan only
+prune_merged.sh -b develop # check merges against develop instead of main
+```
+
+- `-b, --base BRANCH` — local branch to check merges against (default `main`).
+  It is never deleted.
+- `-n, --dry-run` — print the plan and exit.
+- `-y, --yes` — skip the confirmation (required when stdin isn't a terminal).
+- `-h, --help` — print the usage.
+
+A branch or worktree counts as merged when its tip is an ancestor of the base
+(regular or fast-forward merge), when every one of its commits' patches is
+already in the base (rebase merge; skipped for branches containing merge
+commits), or when its combined diff matches a single base commit (squash
+merge). Branches whose net diff is empty (only empty or reverted commits) are
+kept. The check uses your local base branch, so pull it first if branches were
+merged on GitHub. A branch with no commits of its own, such as a freshly
+created worktree branch, counts as merged.
+
+Safety behaviour:
+
+- A worktree is removed only if it is clean (no staged, unstaged or untracked
+  changes, regardless of `status.showUntrackedFiles`), unlocked, merged, not on
+  the base branch, has no rebase/merge/cherry-pick/bisect in progress, contains
+  no other worktree, and is neither the main worktree nor the one you run the
+  script from. Its gitignored files (build output, `.env`, ...) go with it; the
+  plan shows how many.
+- A branch is kept while it is checked out (or being rebased) in a kept
+  worktree.
+- Worktree entries whose directory no longer exists are pruned, unless one of
+  them is a detached HEAD that isn't merged (`git worktree prune` can't skip
+  it, so nothing is pruned).
+- Every worktree HEAD and branch tip is re-checked after confirmation; anything
+  that moved or got dirty since the plan is left alone and reported. Deleted
+  branches are printed with their old SHA.
+- Remote branches are never touched. Failures don't stop the run; they're
+  listed at the end and the script exits non-zero.
+
+Requires: `git` 2.36+.
+
 ## scripts/git/sync_craft_forks/sync_craft_forks.sh
 
 Reads two GitHub star lists for the `gh`-authenticated user, the apps (default
